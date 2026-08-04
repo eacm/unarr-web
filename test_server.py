@@ -194,6 +194,25 @@ class ValidationTests(unittest.TestCase):
         self.assertNotIn("trakt-search-sort", (web / "index.html").read_text())
         self.assertIn("sort=popular", (web / "app.js").read_text())
 
+    def test_torrentclaw_selects_best_valid_release(self):
+        server = object.__new__(UnarrServer)
+        server.torrentclaw_api_key = "test-key"
+        server.torrentclaw_request = Mock(return_value={"results": [{"torrents": [
+            {"infoHash": "0" * 40, "qualityScore": 60, "seeders": 100, "rawTitle": "Lower"},
+            {"infoHash": "1" * 40, "qualityScore": 95, "seeders": 20, "rawTitle": "Best"},
+            {"infoHash": "invalid", "qualityScore": 100, "seeders": 999, "rawTitle": "Invalid"},
+        ]}]})
+        release = server.find_torrentclaw_release({"type": "movie", "title": "Example", "imdbId": "tt1234567"})
+        self.assertEqual(release["rawTitle"], "Best")
+        params = server.torrentclaw_request.call_args.args[0]
+        self.assertEqual(params["imdbid"], "tt1234567")
+
+    def test_torrentclaw_show_requires_episode(self):
+        server = object.__new__(UnarrServer)
+        server.torrentclaw_api_key = "test-key"
+        with self.assertRaisesRegex(ValueError, "episode"):
+            server.find_torrentclaw_release({"type": "show", "title": "Example", "season": 1})
+
 
 if __name__ == "__main__":
     unittest.main()

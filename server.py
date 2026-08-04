@@ -70,6 +70,8 @@ class UnarrHandler(SimpleHTTPRequestHandler):
             return self.trakt_dashboard()
         if request.path == "/api/trakt/settings":
             return self.send_json(self.server.get_trakt_settings())
+        if request.path == "/api/torrentclaw/settings":
+            return self.send_json(self.server.get_torrentclaw_settings())
         if request.path == "/api/trakt/auth":
             return self.send_json(self.server.get_trakt_auth())
         if request.path == "/api/trakt/details":
@@ -96,7 +98,7 @@ class UnarrHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in {"/api/download", "/api/stream", "/api/library/stream", "/api/trakt/settings", "/api/trakt/auth", "/api/settings/restore"}:
+        if path not in {"/api/download", "/api/stream", "/api/library/stream", "/api/trakt/settings", "/api/trakt/auth", "/api/torrentclaw/settings", "/api/torrentclaw/play", "/api/settings/restore"}:
             return self.error_json(404, "Not found.")
         if not self.same_origin():
             return self.error_json(403, "Cross-origin requests are not allowed.")
@@ -117,6 +119,26 @@ class UnarrHandler(SimpleHTTPRequestHandler):
                 return self.error_json(400, str(error))
             except OSError as error:
                 return self.error_json(500, f"Could not save Trakt settings: {error}")
+        if path == "/api/torrentclaw/settings":
+            try:
+                return self.send_json(self.server.save_torrentclaw_settings(body))
+            except ValueError as error:
+                return self.error_json(400, str(error))
+            except OSError as error:
+                return self.error_json(500, f"Could not save TorrentClaw settings: {error}")
+        if path == "/api/torrentclaw/play":
+            try:
+                torrent = self.server.find_torrentclaw_release(body)
+                session_id = self.server.create_stream(torrent["infoHash"])
+                return self.send_json({"id": session_id, "status": "buffering", "release": torrent}, 202)
+            except ValueError as error:
+                return self.error_json(400, str(error))
+            except LookupError as error:
+                return self.error_json(404, str(error))
+            except RuntimeError as error:
+                return self.error_json(503, str(error))
+            except (OSError, urllib.error.URLError) as error:
+                return self.error_json(502, f"Could not start TorrentClaw stream: {error}")
         if path == "/api/trakt/auth":
             try:
                 return self.send_json(self.server.start_trakt_auth(), 202)
@@ -389,6 +411,7 @@ class UnarrServer(ThreadingHTTPServer):
         self.trakt_access_token = os.environ.get("TRAKT_ACCESS_TOKEN", saved_trakt.get("access_token", ""))
         self.trakt_refresh_token = saved_trakt.get("refresh_token", "")
         self.trakt_user = saved_trakt.get("user")
+        self.torrentclaw_api_key = os.environ.get("TORRENTCLAW_API_KEY", saved_trakt.get("torrentclaw_api_key", ""))
         self.trakt_auth = {"status": "idle"}
         self.trakt_auth_id = None
         self.trakt_cache = None
@@ -418,6 +441,7 @@ class UnarrServer(ThreadingHTTPServer):
             "client_id": self.trakt_client_id, "client_secret": self.trakt_client_secret,
             "access_token": self.trakt_access_token, "refresh_token": self.trakt_refresh_token,
             "user": self.trakt_user,
+            "torrentclaw_api_key": getattr(self, "torrentclaw_api_key", ""),
         }
         temporary = TRAKT_SETTINGS_FILE.with_suffix(".tmp")
         temporary.write_text(json.dumps(payload, indent=2))
@@ -434,6 +458,17 @@ class UnarrServer(ThreadingHTTPServer):
             "storage": "server",
         }
 
+    def get_torrentclaw_settings(self):
+        return {"configured": bool(self.torrentclaw_api_key), "hasApiKey": bool(self.torrentclaw_api_key), "baseUrl": "https://torrentclaw.com"}
+
+    def save_torrentclaw_settings(self, body):
+        api_key = body.get("apiKey", "")
+        if not isinstance(api_key, str) or len(api_key.strip()) > 1000:
+            raise ValueError("Enter a valid TorrentClaw API key.")
+        self.torrentclaw_api_key = api_key.strip()
+        self.write_trakt_settings()
+        return self.get_torrentclaw_settings()
+
     def trakt_user_name(self):
         return (self.trakt_user or {}).get("username") or (self.trakt_user or {}).get("name")
 
@@ -446,6 +481,7 @@ class UnarrServer(ThreadingHTTPServer):
                 "accessToken": self.trakt_access_token, "refreshToken": self.trakt_refresh_token,
                 "user": self.trakt_user,
             },
+            "torrentclaw": {"apiKey": getattr(self, "torrentclaw_api_key", "")},
         }
 
     def restore_settings_backup(self, backup):
@@ -458,6 +494,10 @@ class UnarrServer(ThreadingHTTPServer):
         user = trakt.get("user")
         if user is not None and not isinstance(user, dict):
             raise ValueError("The backup contains an invalid user profile.")
+        torrentclaw = backup.get("torrentclaw") or {}
+        api_key = torrentclaw.get("apiKey", "")
+        if not isinstance(torrentclaw, dict) or not isinstance(api_key, str) or len(api_key) > 1000:
+            raise ValueError("The backup contains invalid TorrentClaw settings.")
         with self.trakt_lock:
             self.trakt_client_id = trakt.get("clientId", "")
             self.trakt_client_secret = trakt.get("clientSecret", "")
@@ -467,8 +507,56 @@ class UnarrServer(ThreadingHTTPServer):
             self.trakt_auth = {"status": "idle"}
             self.trakt_auth_id = None
             self.trakt_cache = None
+            self.torrentclaw_api_key = api_key
         self.write_trakt_settings()
         return self.get_trakt_settings()
+
+    def torrentclaw_request(self, params):
+        url = "https://torrentclaw.com/api/v1/search?" + urllib.parse.urlencode(params)
+        headers = {"Accept": "application/json", "User-Agent": "unarr-web/0.1"}
+        if self.torrentclaw_api_key:
+            headers["Authorization"] = f"Bearer {self.torrentclaw_api_key}"
+        request = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as error:
+            if error.code in {401, 403}:
+                raise PermissionError("TorrentClaw API key was rejected") from error
+            if error.code == 429:
+                raise RuntimeError("TorrentClaw rate limit reached; try again shortly") from error
+            raise RuntimeError(f"TorrentClaw returned HTTP {error.code}") from error
+
+    def find_torrentclaw_release(self, body):
+        if not self.torrentclaw_api_key:
+            raise RuntimeError("Add a free TorrentClaw API key in Settings before playing.")
+        media_type = body.get("type")
+        title = body.get("title", "")
+        imdb_id = body.get("imdbId")
+        tmdb_id = body.get("tmdbId")
+        season = body.get("season")
+        episode = body.get("episode")
+        if media_type not in {"movie", "show"} or not isinstance(title, str) or not 1 <= len(title) <= 200:
+            raise ValueError("Invalid title for TorrentClaw playback.")
+        params = {"type": media_type, "availability": "available", "sort": "seeders", "limit": 5}
+        if isinstance(imdb_id, str) and re.fullmatch(r"tt\d{5,12}", imdb_id):
+            params["imdbid"] = imdb_id
+        elif str(tmdb_id or "").isdigit():
+            params["tmdbid"] = str(tmdb_id)
+        else:
+            params["q"] = title
+        if media_type == "show":
+            if isinstance(season, bool) or not isinstance(season, int) or season < 0 or season > 999:
+                raise ValueError("Select a valid season.")
+            if isinstance(episode, bool) or not isinstance(episode, int) or episode < 0 or episode > 9999:
+                raise ValueError("Select a valid episode.")
+            params.update({"season": season, "episode": episode})
+        response = self.torrentclaw_request(params)
+        torrents = [torrent for item in response.get("results", []) for torrent in item.get("torrents", []) if INFO_HASH.fullmatch(str(torrent.get("infoHash", "")))]
+        if not torrents:
+            raise LookupError("TorrentClaw found no playable torrent for this title.")
+        best = max(torrents, key=lambda item: (item.get("qualityScore") or 0, item.get("seeders") or 0))
+        return {key: best.get(key) for key in ("infoHash", "rawTitle", "quality", "codec", "sourceType", "sizeBytes", "seeders", "qualityScore")}
 
     def save_trakt_settings(self, body):
         client_id = body.get("clientId", "").strip() if isinstance(body.get("clientId", ""), str) else ""

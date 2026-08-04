@@ -26,6 +26,8 @@ TRAKT_CLIENT_ID=your-client-id TRAKT_CLIENT_SECRET=your-client-secret python3 se
 
 The Discover screen caches dashboard data for five minutes. Trakt artwork is proxied and cached locally under `.cache/trakt-images`; the browser never hotlinks Trakt's image hosts.
 
+Movie and episode Play buttons query the [TorrentClaw API](https://torrentclaw.com/api/docs#/) by exact IMDb/TMDB ID, choose the strongest quality-score/seeder release, and pass its info hash to the local Unarr streaming engine. A free TorrentClaw API key is required because anonymous responses omit torrent hashes. Add it under Settings or with `TORRENTCLAW_API_KEY`.
+
 ## Current scope
 
 - Verify and display the locally installed unarr version
