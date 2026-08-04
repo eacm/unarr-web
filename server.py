@@ -144,7 +144,10 @@ class UnarrHandler(SimpleHTTPRequestHandler):
             if not isinstance(info_hash, str) or not INFO_HASH.fullmatch(info_hash):
                 return self.error_json(400, "A valid torrent info hash is required.")
             try:
-                result = self.server.start_torbox(info_hash, play=path.endswith("/play"))
+                torrent_id = body.get("torrentId")
+                file_id = body.get("fileId")
+                file_name = body.get("fileName", "")
+                result = self.server.start_torbox(info_hash, play=path.endswith("/play"), torrent_id=torrent_id, file_id=file_id, file_name=file_name)
                 return self.send_json(result, 200 if result.get("url") else 202)
             except (RuntimeError, LookupError, PermissionError) as error:
                 return self.error_json(502, str(error))
@@ -489,6 +492,8 @@ class UnarrServer(ThreadingHTTPServer):
             self.torrentclaw_api_key = api_key.strip()
         if torbox_key.strip():
             self.torbox_api_key = torbox_key.strip()
+            self.torbox_index = []
+            self.torbox_index_time = 0
         self.write_trakt_settings()
         return self.get_torrentclaw_settings()
 
@@ -576,9 +581,17 @@ class UnarrServer(ThreadingHTTPServer):
             if isinstance(episode, bool) or not isinstance(episode, int) or episode < 0 or episode > 9999:
                 raise ValueError("Select a valid episode.")
             params.update({"season": season, "episode": episode})
-        torbox_library = self.find_torbox_library(body) if getattr(self, "torbox_api_key", "") else []
-        torbox_search = self.search_torbox(body) if getattr(self, "torbox_api_key", "") else []
-        response = self.torrentclaw_request(params)
+        if getattr(self, "torbox_api_key", ""):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+                library_future = executor.submit(self.find_torbox_library, body)
+                search_future = executor.submit(self.search_torbox, body)
+                torrentclaw_future = executor.submit(self.torrentclaw_request, params)
+                torbox_library = library_future.result()
+                torbox_search = search_future.result()
+                response = torrentclaw_future.result()
+        else:
+            torbox_library, torbox_search = [], []
+            response = self.torrentclaw_request(params)
         torrents = [torrent for item in response.get("results", []) for torrent in item.get("torrents", []) if INFO_HASH.fullmatch(str(torrent.get("infoHash", "")))]
         if not torrents:
             raise LookupError("TorrentClaw found no playable torrent for this title.")
@@ -602,18 +615,27 @@ class UnarrServer(ThreadingHTTPServer):
         """Compatibility helper for callers that still request one release."""
         return self.find_torrentclaw_releases(body)["releases"][0]
 
-    def torbox_request(self, path, *, data=None, method=None):
+    def torbox_request(self, path, *, form=None):
         if not self.torbox_api_key:
             raise RuntimeError("Add a TorBox API key in Settings first.")
-        headers = {"Authorization": f"Bearer {self.torbox_api_key}", "Accept": "application/json", "User-Agent": "unarr-web/0.1"}
-        request = urllib.request.Request(f"https://api.torbox.app/v1/api/torrents/{path}", data=data, headers=headers, method=method)
+        command = ["curl", "-sS", "--max-time", "45", "-H", f"Authorization: Bearer {self.torbox_api_key}", "-H", "Accept: application/json", "-H", "User-Agent: unarr-web/0.1"]
+        for key, value in (form or {}).items():
+            command.extend(["-F", f"{key}={value}"])
+        command.append(f"https://api.torbox.app/v1/api/torrents/{path}")
         try:
-            with urllib.request.urlopen(request, timeout=25) as response:
-                payload = json.load(response)
-        except urllib.error.HTTPError as error:
-            raise PermissionError(f"TorBox returned HTTP {error.code}. Check the API key and account.") from error
+            result = subprocess.run(command, capture_output=True, text=True, timeout=50, check=False)
+        except (FileNotFoundError, subprocess.TimeoutExpired) as error:
+            raise RuntimeError("TorBox did not respond before the request timed out.") from error
+        if result.returncode:
+            raise RuntimeError(result.stderr.strip() or f"TorBox transport failed with curl code {result.returncode}.")
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            raise RuntimeError("TorBox returned an invalid response.") from error
         if isinstance(payload, dict) and payload.get("success") is False:
             raise RuntimeError(payload.get("detail") or payload.get("error") or "TorBox rejected the request.")
+        if isinstance(payload, dict) and "detail" in payload and "data" not in payload:
+            raise RuntimeError(str(payload["detail"]))
         return payload.get("data", payload) if isinstance(payload, dict) else payload
 
     def torbox_cached(self, hashes):
@@ -632,16 +654,17 @@ class UnarrServer(ThreadingHTTPServer):
         return self.torbox_index
 
     @staticmethod
-    def torbox_release(item, source_group, *, instant=True):
+    def torbox_release(item, source_group, *, instant=True, file=None):
         info_hash = str(item.get("hash") or item.get("info_hash") or item.get("infoHash") or "")
         if not INFO_HASH.fullmatch(info_hash):
             return None
         return {
-            "infoHash": info_hash, "rawTitle": item.get("name") or item.get("title") or item.get("raw_title") or info_hash,
+            "infoHash": info_hash, "rawTitle": (file or {}).get("short_name") or (file or {}).get("name") or item.get("name") or item.get("title") or item.get("raw_title") or info_hash,
             "quality": item.get("quality"), "codec": item.get("codec"), "sourceType": item.get("source") or "TorBox",
-            "sizeBytes": item.get("size") or item.get("size_bytes"), "seeders": item.get("seeders") or 0,
+            "sizeBytes": (file or {}).get("size") or item.get("size") or item.get("size_bytes"), "seeders": item.get("seeders") or item.get("seeds") or 0,
             "qualityScore": item.get("quality_score") or item.get("qualityScore") or 0, "instant": instant,
             "debridProvider": "TorBox", "sourceGroup": source_group,
+            "torrentId": item.get("id") or item.get("torrent_id"), "fileId": (file or {}).get("id"),
         }
 
     def find_torbox_library(self, body):
@@ -649,13 +672,26 @@ class UnarrServer(ThreadingHTTPServer):
         title = re.sub(r"[^a-z0-9]+", " ", clean_title.lower()).strip()
         terms = [term for term in title.split() if len(term) > 1]
         matches = []
+        season = body.get("season")
+        episode = body.get("episode")
         for item in self.refresh_torbox_index():
-            name = re.sub(r"[^a-z0-9]+", " ", str(item.get("name", "")).lower())
             state = str(item.get("download_state") or item.get("status") or "").lower()
-            if terms and all(term in name for term in terms) and state in {"cached", "completed", "uploading", "seeding"}:
-                release = self.torbox_release(item, "torbox-library")
+            if state not in {"cached", "completed", "uploading", "seeding"}:
+                continue
+            videos = [file for file in (item.get("files") or []) if Path(str(file.get("short_name") or file.get("name") or "")).suffix.lower() in VIDEO_EXTENSIONS or str(file.get("mimetype", "")).startswith("video/")]
+            for file in videos:
+                file_name = str(file.get("short_name") or file.get("name") or item.get("name") or "")
+                name = re.sub(r"[^a-z0-9]+", " ", file_name.lower())
+                if not terms or not all(term in name for term in terms):
+                    continue
+                if body["type"] == "show":
+                    episode_match = re.search(r"(?:s|season[ ._-]*)(\d{1,3})[ ._-]*(?:e|x)(\d{1,4})", file_name, re.IGNORECASE)
+                    if not episode_match or (int(episode_match.group(1)), int(episode_match.group(2))) != (season, episode):
+                        continue
+                release = self.torbox_release(item, "torbox-library", file=file)
                 if release:
                     matches.append(release)
+        matches.sort(key=lambda release: (Path(release["rawTitle"]).suffix.lower() in {".mp4", ".m4v", ".webm"}, release.get("sizeBytes") or 0), reverse=True)
         return matches[:20]
 
     def search_torbox(self, body):
@@ -667,14 +703,10 @@ class UnarrServer(ThreadingHTTPServer):
             identity = f"tmdb:{'movie' if body['type'] == 'movie' else 'tv'}:{tmdb_id}"
         else:
             return []
-        request = urllib.request.Request(
-            "https://search-api.torbox.app/torrents/" + urllib.parse.quote(identity, safe=":"),
-            headers={"Authorization": f"Bearer {self.torbox_api_key}", "Accept": "application/json", "User-Agent": "unarr-web/0.1"},
-        )
         try:
-            with urllib.request.urlopen(request, timeout=15) as response:
-                payload = json.load(response)
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
+            result = subprocess.run(["curl", "-sS", "--max-time", "8", "-H", f"Authorization: Bearer {self.torbox_api_key}", "-H", "Accept: application/json", "https://search-api.torbox.app/torrents/" + urllib.parse.quote(identity, safe=":")], capture_output=True, text=True, timeout=12, check=False)
+            payload = json.loads(result.stdout) if result.returncode == 0 else {}
+        except (subprocess.TimeoutExpired, json.JSONDecodeError):
             return []
         values = payload.get("data") or payload.get("results") or payload.get("torrents") or payload if isinstance(payload, dict) else payload
         if isinstance(values, dict):
@@ -682,47 +714,68 @@ class UnarrServer(ThreadingHTTPServer):
         releases = [self.torbox_release(item, "torbox-search", instant=bool(item.get("cached", True))) for item in (values or []) if isinstance(item, dict)]
         return [item for item in releases if item][:20]
 
-    def start_torbox(self, info_hash, *, play):
+    def start_torbox(self, info_hash, *, play, torrent_id=None, file_id=None, file_name=""):
         job_id = self.add_activity("torbox", info_hash, "Opening instant TorBox stream" if play else "Adding download to TorBox")
-        boundary = secrets.token_hex(16)
-        magnet = f"magnet:?xt=urn:btih:{info_hash}"
-        parts = [f"--{boundary}\r\nContent-Disposition: form-data; name=\"magnet\"\r\n\r\n{magnet}\r\n"]
-        if play:
-            parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"add_only_if_cached\"\r\n\r\ntrue\r\n")
-        parts.append(f"--{boundary}--\r\n")
-        data = "".join(parts).encode()
-        # torbox_request adds the auth headers; this content type is required for magnet form data.
-        url = "https://api.torbox.app/v1/api/torrents/createtorrent"
-        request = urllib.request.Request(url, data=data, headers={"Authorization": f"Bearer {self.torbox_api_key}", "Accept": "application/json", "Content-Type": f"multipart/form-data; boundary={boundary}", "User-Agent": "unarr-web/0.1"}, method="POST")
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                payload = json.load(response)
-            if payload.get("success") is False:
-                raise RuntimeError(payload.get("detail") or "TorBox could not add this release.")
-            created = payload.get("data") or {}
-            torrent_id = created.get("torrent_id") or created.get("id")
+            if not torrent_id:
+                form = {"magnet": f"magnet:?xt=urn:btih:{info_hash}"}
+                if play:
+                    form["add_only_if_cached"] = "true"
+                created = self.torbox_request("createtorrent", form=form)
+                torrent_id = created.get("torrent_id") or created.get("id") if isinstance(created, dict) else None
             if not torrent_id:
                 raise RuntimeError("TorBox did not return a torrent ID.")
             if not play:
                 self.update_activity(job_id, "active", "Queued in TorBox")
                 return {"status": "queued", "activityId": job_id}
-            listing = self.torbox_request("mylist?" + urllib.parse.urlencode({"id": torrent_id, "bypass_cache": "true"}))
-            item = listing[0] if isinstance(listing, list) and listing else listing
-            files = item.get("files", []) if isinstance(item, dict) else []
-            videos = [file for file in files if Path(str(file.get("name", ""))).suffix.lower() in VIDEO_EXTENSIONS]
-            chosen = max(videos or files, key=lambda file: file.get("size") or file.get("size_bytes") or 0, default=None)
-            if not chosen:
-                raise LookupError("TorBox has no playable video file for this release.")
-            file_id = chosen.get("id") or chosen.get("file_id")
-            link = self.torbox_request("requestdl?" + urllib.parse.urlencode({"torrent_id": torrent_id, "file_id": file_id, "redirect": "false"}))
+            if file_id is None:
+                listing = self.torbox_request("mylist?" + urllib.parse.urlencode({"id": torrent_id, "bypass_cache": "true"}))
+                item = listing[0] if isinstance(listing, list) and listing else listing
+                files = item.get("files", []) if isinstance(item, dict) else []
+                videos = [file for file in files if Path(str(file.get("short_name") or file.get("name", ""))).suffix.lower() in VIDEO_EXTENSIONS]
+                chosen = max(videos or files, key=lambda file: file.get("size") or file.get("size_bytes") or 0, default=None)
+                if not chosen:
+                    raise LookupError("TorBox has no playable video file for this release.")
+                file_id = chosen.get("id") or chosen.get("file_id")
+            link = self.torbox_request("requestdl?" + urllib.parse.urlencode({"token": self.torbox_api_key, "torrent_id": torrent_id, "file_id": file_id, "redirect": "false"}))
             url = link if isinstance(link, str) else (link or {}).get("url") or (link or {}).get("link")
             if not url:
                 raise RuntimeError("TorBox did not return a playable CDN URL.")
             self.update_activity(job_id, "complete", "Instant stream ready")
+            if Path(file_name).suffix.lower() not in {".mp4", ".m4v", ".webm"}:
+                session_id = self.create_remote_hls(url, info_hash, file_id)
+                return {"status": "buffering", "id": session_id, "activityId": job_id}
             return {"status": "ready", "url": url, "activityId": job_id}
         except Exception as error:
             self.update_activity(job_id, "error", str(error))
             raise
+
+    def create_remote_hls(self, source_url, info_hash, file_id):
+        if not self.ffmpeg:
+            raise RuntimeError("ffmpeg is required to play this TorBox container in a browser.")
+        media_id = f"tb{info_hash[:16]}f{file_id}"
+        output_dir = HLS_ROOT / media_id
+        playlist = output_dir / "master.m3u8"
+        session_id = secrets.token_urlsafe(18)
+        if output_dir.exists():
+            shutil.rmtree(output_dir)
+        output_dir.mkdir(parents=True)
+        args = [
+            self.ffmpeg, "-hide_banner", "-y", "-i", source_url, "-map", "0:v:0", "-map", "0:a:0?",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-maxrate", "5M", "-bufsize", "10M",
+            "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-f", "hls", "-hls_time", "4",
+            "-hls_playlist_type", "event", "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4",
+            "-hls_segment_filename", str(output_dir / "seg-%06d.m4s"), str(playlist),
+        ]
+        process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        with self.stream_lock:
+            self.streams[session_id] = {
+                "kind": "torbox", "status": "buffering", "phase": "transcoding", "message": "Preparing TorBox HLS…",
+                "progress": 0, "url": None, "error": None, "process": process, "started_at": time.monotonic(),
+                "playlist": playlist, "media_url": f"/media/{media_id}/master.m3u8", "tracks": [], "audio": {},
+            }
+        threading.Thread(target=self.watch_library_stream, args=(session_id,), name=f"torbox-hls-{process.pid}", daemon=True).start()
+        return session_id
 
     def add_activity(self, provider, info_hash, message):
         item = {"id": secrets.token_urlsafe(8), "provider": provider, "infoHash": info_hash, "status": "active", "message": message, "createdAt": int(time.time())}
