@@ -178,7 +178,7 @@ class UnarrHandler(SimpleHTTPRequestHandler):
 
     def trakt_search(self, params):
         query = params.get("q", [""])[0].strip()
-        sort = params.get("sort", ["recommended"])[0]
+        sort = params.get("sort", ["popular"])[0]
         if not 2 <= len(query) <= 120:
             return self.error_json(400, "Search must be between 2 and 120 characters.")
         if sort not in {"recommended", "popular"}:

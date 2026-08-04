@@ -35,9 +35,8 @@ header nav { display: flex; gap: 3px; padding: 4px; border: 1px solid #ffffff0d;
 h1 { max-width: 900px; margin: 16px 0 26px; color: #f6f7f3; font: 650 clamp(50px,8vw,100px)/.94 Inter,ui-sans-serif,system-ui,sans-serif; letter-spacing: -.072em; }
 h1 em { color: var(--lime); font-style: normal; font-weight: inherit; }
 .lede { max-width: 670px; color: #a8ada8; font-size: clamp(17px,2vw,21px); }
-.search { position: relative; z-index: 12; grid-template-columns: 1fr auto auto; margin-top: 48px; border-color: #ffffff15; border-radius: 16px; background: #121512dc; box-shadow: 0 28px 90px #0008; backdrop-filter: blur(16px); }
+.search { position: relative; z-index: 12; grid-template-columns: 1fr auto; margin-top: 48px; border-color: #ffffff15; border-radius: 16px; background: #121512dc; box-shadow: 0 28px 90px #0008; backdrop-filter: blur(16px); }
 .search input { color: var(--ink); }
-.search > select { align-self: center; border: 1px solid #ffffff12; border-radius: 999px; background: #090b09; color: var(--ink); padding: 10px 13px; font: 650 13px/1 Inter,ui-sans-serif,system-ui,sans-serif; }
 .search button, .settings-card button, .trakt-device a { border: 0; border-radius: 999px; background: var(--lime); color: #11140f; font-weight: 800; }
 .filters { border-color: #ffffff0e; }
 .search-matches { position: absolute; z-index: 30; top: calc(100% + 9px); left: 0; right: 0; max-height: min(590px,70vh); overflow-y: auto; border: 1px solid #ffffff18; border-radius: 15px; background: #0d100df5; padding: 8px; box-shadow: 0 28px 90px #000c; backdrop-filter: blur(22px); }
@@ -53,7 +52,7 @@ h1 em { color: var(--lime); font-style: normal; font-weight: inherit; }
 .release button { border-radius: 999px; }
 dialog { border-color: #ffffff16; background: #101310; box-shadow: 0 35px 100px #000c; }
 .title-dialog { width: min(1080px,calc(100% - 24px)); max-height: min(880px,92vh); overflow: auto; padding: 0; border-radius: 20px; }
-.title-close { position: sticky; float: right; top: 14px; right: 14px; z-index: 5; width: 38px; height: 38px; margin: 14px; border: 1px solid #ffffff20; border-radius: 50%; background: #070907cc; color: white; font-size: 24px; cursor: pointer; backdrop-filter: blur(12px); }
+.title-close { position: absolute; top: 14px; right: 14px; z-index: 5; width: 38px; height: 38px; margin: 0; border: 1px solid #ffffff20; border-radius: 50%; background: #070907cc; color: white; font-size: 24px; cursor: pointer; backdrop-filter: blur(12px); }
 #title-detail { position: relative; min-height: 420px; overflow: hidden; }
 .detail-loading { display: grid; min-height: 180px; place-items: center; padding: 30px; color: var(--muted); }
 .detail-backdrop { position: absolute; inset: 0 0 auto; width: 100%; height: 440px; object-fit: cover; opacity: .62; }
@@ -131,6 +130,5 @@ dialog { border-color: #ffffff16; background: #101310; box-shadow: 0 35px 100px 
   .library-tools { flex-wrap: wrap; }
   #transcode-state { width: 100%; }
   .settings-panel { grid-template-columns: 1fr; padding-top: 38px; }
-  .search { grid-template-columns: 1fr auto; }.search > input { grid-column: 1/-1; }.search > select { grid-column: 1; grid-row: 2; margin-left: 8px; }.search > button { grid-column: 2; grid-row: 2; }
   .detail-body { display: block; padding-top: 180px; }.detail-poster { width: 120px; margin-bottom: 18px; }.detail-backdrop { height: 330px; }.detail-shade { background: linear-gradient(180deg,#07090720 0,#101310 330px); }.episode-card { grid-template-columns: 105px 1fr; }.episode-card p { display: none; }
 }

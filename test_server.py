@@ -189,6 +189,11 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(server.search_trakt("test", "recommended")[0]["title"], "Relevant")
         self.assertEqual(server.search_trakt("test", "popular")[0]["title"], "Popular")
 
+    def test_live_search_has_no_sort_control(self):
+        web = Path(__file__).parent / "web"
+        self.assertNotIn("trakt-search-sort", (web / "index.html").read_text())
+        self.assertIn("sort=popular", (web / "app.js").read_text())
+
 
 if __name__ == "__main__":
     unittest.main()
