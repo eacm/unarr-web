@@ -131,6 +131,9 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("groupedLibraryTitle", app)
         self.assertIn("library-poster", app)
         self.assertIn("openLibraryGroup", app)
+        self.assertIn("rankedTraktMatches", app)
+        self.assertIn("autoMatchLibrary", app)
+        self.assertIn("folderTitle", (Path(__file__).parent / "server.py").read_text())
 
     def test_trakt_artwork_uses_same_origin_proxy(self):
         server = object.__new__(UnarrServer)

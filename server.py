@@ -191,6 +191,7 @@ class UnarrHandler(SimpleHTTPRequestHandler):
             except PermissionError as error:
                 return self.error_json(401, str(error))
             except (RuntimeError, OSError) as error:
+                print(f"[library-action] {body.get('action')} failed for {body.get('itemId')}: {error}")
                 return self.error_json(502, str(error))
         if path == "/api/stream/tracks":
             try:
@@ -230,7 +231,7 @@ class UnarrHandler(SimpleHTTPRequestHandler):
             return self.error_json(500, f"Could not read the unarr library: {error}")
         items = []
         for value in cache.get("items", []):
-            item = dict(self.server.public_library_item(value), source="local", dateAdded=value.get("modTime"))
+            item = dict(self.server.public_library_item(value), source="local", dateAdded=value.get("modTime"), folderTitle=Path(value.get("filePath", "")).parent.name)
             link = self.server.library_links.get(item["id"]) or {}
             if link:
                 item.update(linked=True, trakt=link, image=link.get("image"), title=link.get("title") or item["title"], released=link.get("released"))
@@ -249,7 +250,7 @@ class UnarrHandler(SimpleHTTPRequestHandler):
         selected = {"local": items, "cloud": cloud, "favorites": favorites}.get(source, items + cloud + favorites)
         title_query = (((query or {}).get("q") or [""])[0]).strip().casefold()
         if title_query:
-            selected = [item for item in selected if title_query in str(item.get("title") or "").casefold()]
+            selected = [item for item in selected if title_query in " ".join(str(item.get(key) or "") for key in ("title", "folderTitle", "fileName")).casefold()]
         sort = (((query or {}).get("sort") or ["az"])[0])
         if sort not in {"az", "za", "added", "released"}:
             return self.error_json(400, "Invalid library sort.")
@@ -743,7 +744,8 @@ class UnarrServer(ThreadingHTTPServer):
             info_hash = str(torrent.get("hash") or torrent.get("info_hash") or "")
             torrent_id = torrent.get("id") or torrent.get("torrent_id")
             for file in torrent.get("files") or []:
-                name = str(file.get("short_name") or file.get("name") or "")
+                full_name = str(file.get("name") or file.get("short_name") or "")
+                name = str(file.get("short_name") or Path(full_name).name or "")
                 if Path(name).suffix.lower() not in VIDEO_EXTENSIONS and not str(file.get("mimetype", "")).startswith("video/"):
                     continue
                 file_id = file.get("id")
@@ -754,6 +756,7 @@ class UnarrServer(ThreadingHTTPServer):
                     "fileSize": file.get("size") or 0, "infoHash": info_hash, "torrentId": torrent_id,
                     "fileId": file_id, "linked": bool(link), "trakt": link, "image": link.get("image"),
                     "released": link.get("released"), "dateAdded": torrent.get("created_at") or torrent.get("updated_at") or torrent.get("download_finished"),
+                    "folderTitle": Path(full_name).parent.name if Path(full_name).parent.name not in {"", "."} else str(torrent.get("name") or ""),
                 })
         return values
 
