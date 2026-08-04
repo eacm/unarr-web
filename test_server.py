@@ -117,6 +117,16 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("/api/trakt/watchlist", app)
         self.assertIn('id="poster-actions"', markup)
 
+    def test_library_uses_title_and_source_filters(self):
+        markup = (Path(__file__).parent / "web" / "index.html").read_text()
+        app = (Path(__file__).parent / "web" / "app.js").read_text()
+        self.assertNotIn('id="library-quality"', markup)
+        self.assertNotIn('id="transcode-state"', markup)
+        for source in ("favorites", "cloud", "local", "all"):
+            self.assertIn(f'data-library-filter="{source}"', markup)
+        self.assertIn("data-library-action", app)
+        self.assertIn("Match with Trakt", app)
+
     def test_trakt_artwork_uses_same_origin_proxy(self):
         server = object.__new__(UnarrServer)
         server.trakt_lock = threading.Lock()

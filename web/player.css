@@ -98,12 +98,14 @@ dialog { border-color: #ffffff16; background: #101310; box-shadow: 0 35px 100px 
 
 .library-tools { margin-top: 48px; border-color: #ffffff10; border-radius: 14px; background: #101310cc; backdrop-filter: blur(16px); }
 .library-tools input { color: var(--ink); }
+.library-tabs { display:flex; flex-wrap:wrap; gap:7px; }.library-tabs button { border:1px solid #ffffff16; border-radius:99px; padding:8px 12px; background:transparent; color:var(--muted); font:inherit; font-size:12px; font-weight:750; cursor:pointer; }.library-tabs button.active { background:var(--lime); border-color:var(--lime); color:#10120f; }
 .library-tools select, .track-pickers select { border-color: #ffffff13; background: #080a08; }
 #transcode-state { color: var(--muted); font-size: 12px; }
 .library-card .integrity { color: #ff8b7c; }
 .library-card .media-summary { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; }
 .library-card .media-summary span { border: 1px solid #ffffff12; border-radius: 99px; padding: 3px 8px; color: var(--muted); font-size: 11px; }
-.library-card .play-library { width: 100%; margin-top: 15px; border: 0; border-radius: 999px; padding: 10px; background: var(--lime); color: #11140f; font-weight: 800; cursor: pointer; }
+.library-card .play-library,.library-card .play-cloud,.library-card .favorite-download { width: 100%; margin-top: 15px; border: 0; border-radius: 999px; padding: 10px; background: var(--lime); color: #11140f; font-weight: 800; cursor: pointer; }
+.library-card { -webkit-touch-callout:none; -webkit-user-select:none; user-select:none; cursor:pointer; }.library-card-poster { width:calc(100% + 40px); aspect-ratio:16/9; margin:-20px -20px 16px; object-fit:cover; }.source-chip { align-self:flex-start; border:1px solid #ffffff18; border-radius:99px; padding:3px 8px; color:var(--lime); font-size:10px; font-weight:800; text-transform:uppercase; }
 .track-pickers { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; }
 .track-pickers label { color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
 .track-pickers select { display: block; width: 100%; min-width: 0; margin-top: 4px; border-radius: 8px; padding: 7px; color: var(--ink); text-transform: none; letter-spacing: normal; }

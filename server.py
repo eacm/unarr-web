@@ -66,7 +66,7 @@ class UnarrHandler(SimpleHTTPRequestHandler):
         if request.path == "/api/search":
             return self.search(parse_qs(request.query))
         if request.path == "/api/library":
-            return self.library()
+            return self.library(parse_qs(request.query))
         if request.path == "/api/trakt/dashboard":
             return self.trakt_dashboard()
         if request.path == "/api/trakt/settings":
@@ -101,7 +101,7 @@ class UnarrHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in {"/api/download", "/api/stream", "/api/stream/tracks", "/api/library/stream", "/api/trakt/settings", "/api/trakt/auth", "/api/trakt/scrobble", "/api/trakt/watchlist", "/api/torrentclaw/settings", "/api/torrentclaw/releases", "/api/torrentclaw/debrid/play", "/api/torrentclaw/debrid/download", "/api/settings/restore"}:
+        if path not in {"/api/download", "/api/stream", "/api/stream/tracks", "/api/library/stream", "/api/library/action", "/api/trakt/settings", "/api/trakt/auth", "/api/trakt/scrobble", "/api/trakt/watchlist", "/api/torrentclaw/settings", "/api/torrentclaw/releases", "/api/torrentclaw/debrid/play", "/api/torrentclaw/debrid/download", "/api/settings/restore"}:
             return self.error_json(404, "Not found.")
         if not self.same_origin():
             return self.error_json(403, "Cross-origin requests are not allowed.")
@@ -181,6 +181,17 @@ class UnarrHandler(SimpleHTTPRequestHandler):
                 return self.error_json(502, str(error))
         if path == "/api/library/stream":
             return self.start_library_stream(body)
+        if path == "/api/library/action":
+            try:
+                return self.send_json(self.server.library_action(body))
+            except ValueError as error:
+                return self.error_json(400, str(error))
+            except LookupError as error:
+                return self.error_json(404, str(error))
+            except PermissionError as error:
+                return self.error_json(401, str(error))
+            except (RuntimeError, OSError) as error:
+                return self.error_json(502, str(error))
         if path == "/api/stream/tracks":
             try:
                 session_id = body.get("sessionId", "")
@@ -209,14 +220,34 @@ class UnarrHandler(SimpleHTTPRequestHandler):
         except (ValueError, TypeError, json.JSONDecodeError):
             return None
 
-    def library(self):
+    def library(self, query=None):
+        source = ((query or {}).get("source") or ["all"])[0]
+        if source not in {"all", "local", "cloud", "favorites"}:
+            return self.error_json(400, "Invalid library source.")
         try:
             cache = self.server.reconcile_library()
         except (OSError, json.JSONDecodeError) as error:
             return self.error_json(500, f"Could not read the unarr library: {error}")
-        items = [self.server.public_library_item(item) for item in cache.get("items", [])]
+        items = [dict(self.server.public_library_item(item), source="local") for item in cache.get("items", [])]
+        cloud, favorites = [], []
+        if source in {"all", "cloud"}:
+            try:
+                cloud = self.server.get_cloud_library()
+            except RuntimeError:
+                cloud = []
+        if source in {"all", "favorites"}:
+            try:
+                favorites = self.server.get_trakt_favorites()
+            except (RuntimeError, PermissionError, urllib.error.URLError):
+                favorites = []
+        selected = {"local": items, "cloud": cloud, "favorites": favorites}.get(source, items + cloud + favorites)
+        title_query = (((query or {}).get("q") or [""])[0]).strip().casefold()
+        if title_query:
+            selected = [item for item in selected if title_query in str(item.get("title") or "").casefold()]
+        total = len(selected)
+        selected = selected[:250]
         return self.send_json({
-            "items": items, "scannedAt": cache.get("scannedAt"), "refreshedAt": cache.get("refreshedAt"),
+            "items": selected, "total": total, "source": source, "counts": {"local": len(items), "cloud": len(cloud), "favorites": len(favorites)}, "scannedAt": cache.get("scannedAt"), "refreshedAt": cache.get("refreshedAt"),
             "transcode": {"available": bool(self.server.ffmpeg and self.server.ffprobe), "ffmpeg": self.server.ffmpeg},
             "scan": self.server.get_scan_state(),
         })
@@ -462,10 +493,13 @@ class UnarrServer(ThreadingHTTPServer):
         self.trakt_user = saved_trakt.get("user")
         self.torrentclaw_api_key = os.environ.get("TORRENTCLAW_API_KEY", saved_trakt.get("torrentclaw_api_key", ""))
         self.torbox_api_key = os.environ.get("TORBOX_API_KEY", saved_trakt.get("torbox_api_key", ""))
+        self.library_links = saved_trakt.get("library_links", {}) if isinstance(saved_trakt.get("library_links", {}), dict) else {}
         self.trakt_auth = {"status": "idle"}
         self.trakt_auth_id = None
         self.trakt_cache = None
         self.trakt_cache_time = 0
+        self.trakt_favorites_cache = None
+        self.trakt_favorites_cache_time = 0
         self.trakt_lock = threading.Lock()
         self.trakt_images = {}
         super().__init__(address, handler)
@@ -493,6 +527,7 @@ class UnarrServer(ThreadingHTTPServer):
             "user": self.trakt_user,
             "torrentclaw_api_key": getattr(self, "torrentclaw_api_key", ""),
             "torbox_api_key": getattr(self, "torbox_api_key", ""),
+            "library_links": getattr(self, "library_links", {}),
         }
         temporary = TRAKT_SETTINGS_FILE.with_suffix(".tmp")
         temporary.write_text(json.dumps(payload, indent=2))
@@ -683,6 +718,103 @@ class UnarrServer(ThreadingHTTPServer):
         self.torbox_index = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
         self.torbox_index_time = time.time()
         return self.torbox_index
+
+    def get_cloud_library(self):
+        if not self.torbox_api_key:
+            return []
+        values = []
+        for torrent in self.refresh_torbox_index():
+            state = str(torrent.get("download_state") or torrent.get("status") or "").lower()
+            if state not in {"cached", "completed", "uploading", "seeding"}:
+                continue
+            info_hash = str(torrent.get("hash") or torrent.get("info_hash") or "")
+            torrent_id = torrent.get("id") or torrent.get("torrent_id")
+            for file in torrent.get("files") or []:
+                name = str(file.get("short_name") or file.get("name") or "")
+                if Path(name).suffix.lower() not in VIDEO_EXTENSIONS and not str(file.get("mimetype", "")).startswith("video/"):
+                    continue
+                file_id = file.get("id")
+                item_id = f"cloud:{torrent_id}:{file_id}"
+                link = self.library_links.get(item_id) or {}
+                values.append({
+                    "id": item_id, "source": "cloud", "title": link.get("title") or name, "fileName": name,
+                    "fileSize": file.get("size") or 0, "infoHash": info_hash, "torrentId": torrent_id,
+                    "fileId": file_id, "linked": bool(link), "trakt": link, "image": link.get("image"),
+                })
+        return values
+
+    def get_trakt_favorites(self):
+        if not self.trakt_access_token:
+            return []
+        if self.trakt_favorites_cache is not None and time.monotonic() - self.trakt_favorites_cache_time < 300:
+            return self.trakt_favorites_cache
+        values = []
+        for media_type in ("movies", "shows"):
+            for value in self.trakt_request(f"/sync/favorites/{media_type}?limit=1000", authenticated=True):
+                item = self.normalize_trakt_item(value, "favorites")
+                item.update(id=f"favorite:{item['mediaType']}:{item.get('ids', {}).get('trakt')}", source="favorites", favorite=True, fileName="Trakt favorite", fileSize=0)
+                values.append(item)
+        self.trakt_favorites_cache = values
+        self.trakt_favorites_cache_time = time.monotonic()
+        return values
+
+    def library_action(self, body):
+        action, item_id = body.get("action"), body.get("itemId")
+        if action not in {"link", "delete", "unfavorite", "download-local"} or not isinstance(item_id, str):
+            raise ValueError("A valid library action and item are required.")
+        if action == "link":
+            media_type, trakt_id, title = body.get("type"), body.get("traktId"), body.get("title")
+            if media_type not in {"movie", "show"} or isinstance(trakt_id, bool) or not isinstance(trakt_id, int) or trakt_id < 1:
+                raise ValueError("Choose a valid Trakt movie or show.")
+            self.library_links[item_id] = {"type": media_type, "traktId": trakt_id, "title": str(title or "Matched title")[:300], "image": str(body.get("image") or "")[:1000]}
+            self.write_trakt_settings()
+            return {"ok": True, "linked": self.library_links[item_id]}
+        if action == "unfavorite":
+            match = re.fullmatch(r"favorite:(movie|show):(\d+)", item_id)
+            if not match or not self.trakt_access_token:
+                raise PermissionError("Connect Trakt before changing favorites.")
+            media_type, trakt_id = match.group(1), int(match.group(2))
+            plural = "movies" if media_type == "movie" else "shows"
+            self.trakt_sync_remove("favorites", plural, trakt_id)
+            return {"ok": True}
+        if item_id.startswith("cloud:"):
+            item = next((value for value in self.get_cloud_library() if value["id"] == item_id), None)
+            if not item:
+                raise LookupError("Cloud item no longer exists.")
+            if action == "download-local":
+                if not INFO_HASH.fullmatch(item["infoHash"]):
+                    raise ValueError("Cloud item has no valid torrent hash.")
+                return {"ok": True, "infoHash": item["infoHash"]}
+            if action == "delete":
+                self.torbox_request("controltorrent", form={"torrent_id": item["torrentId"], "operation": "delete"})
+                self.torbox_index = []
+                self.torbox_index_time = 0
+                self.library_links.pop(item_id, None)
+                self.write_trakt_settings()
+                return {"ok": True}
+        if action == "delete":
+            item = next((value for value in self.reconcile_library().get("items", []) if self.library_item_id(value) == item_id), None)
+            if not item:
+                raise LookupError("Local library item no longer exists.")
+            path = Path(item["filePath"])
+            if not path.is_file():
+                raise LookupError("Local file no longer exists.")
+            path.unlink()
+            self.library_snapshot = None
+            return {"ok": True}
+        raise ValueError("That action is not available for this item.")
+
+    def trakt_sync_remove(self, collection, plural, trakt_id):
+        payload = {plural: [{"ids": {"trakt": trakt_id}}]}
+        request = urllib.request.Request(
+            f"https://api.trakt.tv/sync/{collection}/remove", data=json.dumps(payload).encode(), method="POST",
+            headers={"trakt-api-version": "2", "trakt-api-key": self.trakt_client_id, "Authorization": f"Bearer {self.trakt_access_token}", "Content-Type": "application/json", "User-Agent": "unarr-web/0.1"},
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:
+            json.load(response)
+        with self.trakt_lock:
+            self.trakt_cache = None
+            self.trakt_favorites_cache = None
 
     @staticmethod
     def torbox_release(item, source_group, *, instant=True, file=None):
