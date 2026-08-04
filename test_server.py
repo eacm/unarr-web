@@ -175,6 +175,8 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("/api/trakt/search?q=", script)
         self.assertIn("loadTraktMatches", script)
         self.assertNotIn("fetch(`/api/search?${params}`)", script)
+        styles = (Path(__file__).parent / "web" / "player.css").read_text()
+        self.assertRegex(styles, r"\.search \{[^}]*z-index: 12")
 
 
 if __name__ == "__main__":
