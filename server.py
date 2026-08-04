@@ -1122,6 +1122,7 @@ class UnarrServer(ThreadingHTTPServer):
         image_url = self.register_trakt_image(image_source) if image_source else None
         progress = value.get("progress")
         rating = value.get("rating") or media.get("rating")
+        episode_context = value.get("episode") or (media if media_type == "episode" else {})
         return {
             "title": title, "year": media.get("year"), "overview": media.get("overview"),
             "ids": media.get("ids", {}), "image": image_url, "progress": progress,
@@ -1129,6 +1130,7 @@ class UnarrServer(ThreadingHTTPServer):
             "calendarAt": value.get("first_aired") or value.get("released"),
             "plays": value.get("plays"), "section": section, "mediaType": media_type,
             "score": value.get("score"), "votes": media.get("votes"),
+            "season": episode_context.get("season"), "episode": episode_context.get("number"),
         }
 
     def get_trakt_details(self, media_type, trakt_id, season=None):
