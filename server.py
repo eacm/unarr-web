@@ -100,7 +100,7 @@ class UnarrHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in {"/api/download", "/api/stream", "/api/library/stream", "/api/trakt/settings", "/api/trakt/auth", "/api/trakt/scrobble", "/api/torrentclaw/settings", "/api/torrentclaw/releases", "/api/torrentclaw/debrid/play", "/api/torrentclaw/debrid/download", "/api/settings/restore"}:
+        if path not in {"/api/download", "/api/stream", "/api/stream/tracks", "/api/library/stream", "/api/trakt/settings", "/api/trakt/auth", "/api/trakt/scrobble", "/api/torrentclaw/settings", "/api/torrentclaw/releases", "/api/torrentclaw/debrid/play", "/api/torrentclaw/debrid/download", "/api/settings/restore"}:
             return self.error_json(404, "Not found.")
         if not self.same_origin():
             return self.error_json(403, "Cross-origin requests are not allowed.")
@@ -171,6 +171,17 @@ class UnarrHandler(SimpleHTTPRequestHandler):
                 return self.error_json(502, str(error))
         if path == "/api/library/stream":
             return self.start_library_stream(body)
+        if path == "/api/stream/tracks":
+            try:
+                session_id = body.get("sessionId", "")
+                audio_index = body.get("audioIndex", 0)
+                subtitle_index = body.get("subtitleIndex", -1)
+                self.server.select_remote_tracks(session_id, audio_index, subtitle_index)
+                return self.send_json({"id": session_id, "status": "buffering"}, 202)
+            except ValueError as error:
+                return self.error_json(400, str(error))
+            except (LookupError, RuntimeError, OSError) as error:
+                return self.error_json(502, str(error))
         info_hash = body.get("infoHash", "")
         if not isinstance(info_hash, str) or not INFO_HASH.fullmatch(info_hash):
             return self.error_json(400, "A valid torrent info hash is required.")
@@ -751,27 +762,89 @@ class UnarrServer(ThreadingHTTPServer):
             if not url:
                 raise RuntimeError("TorBox did not return a playable CDN URL.")
             self.update_activity(job_id, "complete", "Instant stream ready")
-            if Path(file_name).suffix.lower() not in {".mp4", ".m4v", ".webm"}:
-                session_id = self.create_remote_hls(url, info_hash, file_id)
-                return {"status": "buffering", "id": session_id, "activityId": job_id}
-            session_id = self.create_direct_stream(url)
-            return {"status": "ready", "id": session_id, "activityId": job_id}
+            session_id = self.create_remote_selection(url, info_hash, file_id, file_name)
+            return {"status": "selecting", "id": session_id, "activityId": job_id}
         except Exception as error:
             self.update_activity(job_id, "error", str(error))
             raise
 
-    def create_remote_hls(self, source_url, info_hash, file_id):
+    def create_remote_selection(self, source_url, info_hash, file_id, file_name):
+        if not self.ffprobe:
+            raise RuntimeError("ffprobe is required to inspect TorBox audio and subtitle tracks.")
+        result = subprocess.run(
+            [self.ffprobe, "-v", "error", "-show_entries", "format=duration:stream=index,codec_type,codec_name,channels:stream_tags=language,title:stream_disposition=default", "-of", "json", source_url],
+            capture_output=True, text=True, timeout=45, check=False,
+        )
+        if result.returncode:
+            raise RuntimeError((result.stderr or "Could not inspect TorBox media tracks.").strip())
+        try:
+            probe = json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            raise RuntimeError("ffprobe returned invalid TorBox media metadata.") from error
+        audio, subtitles = [], []
+        for stream in probe.get("streams", []):
+            tags, disposition = stream.get("tags") or {}, stream.get("disposition") or {}
+            track = {"codec": stream.get("codec_name"), "lang": tags.get("language"), "title": tags.get("title"), "default": bool(disposition.get("default"))}
+            if stream.get("codec_type") == "audio":
+                track["channels"] = stream.get("channels")
+                audio.append(track)
+            elif stream.get("codec_type") == "subtitle":
+                subtitles.append(track)
+        session_id = secrets.token_urlsafe(18)
+        with self.stream_lock:
+            self.streams[session_id] = {
+                "kind": "torbox", "status": "selecting", "phase": "tracks", "message": "Choose audio and subtitles",
+                "progress": 0, "url": None, "error": None, "process": None, "started_at": time.monotonic(),
+                "source_url": source_url, "info_hash": info_hash, "file_id": file_id, "file_name": file_name,
+                "availableAudio": audio, "availableSubtitles": subtitles,
+                "durationSeconds": float((probe.get("format") or {}).get("duration") or 0),
+            }
+        return session_id
+
+    def select_remote_tracks(self, session_id, audio_index, subtitle_index):
+        if not isinstance(session_id, str) or not session_id:
+            raise ValueError("A valid stream session is required.")
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in (audio_index, subtitle_index)):
+            raise ValueError("Track selections must be integers.")
+        with self.stream_lock:
+            item = self.streams.get(session_id)
+            if not item or item.get("status") != "selecting":
+                raise LookupError("The TorBox track-selection session is no longer available.")
+            audio = item.get("availableAudio") or []
+            subtitles = item.get("availableSubtitles") or []
+            if audio_index < 0 or (audio and audio_index >= len(audio)) or subtitle_index < -1 or subtitle_index >= len(subtitles):
+                raise ValueError("The selected audio or subtitle track does not exist.")
+            source_url, info_hash, file_id = item["source_url"], item["info_hash"], item["file_id"]
+            duration = item.get("durationSeconds")
+        self.create_remote_hls(source_url, info_hash, file_id, audio_index, subtitle_index, session_id=session_id, duration=duration, audio=audio, subtitles=subtitles)
+
+    def create_remote_hls(self, source_url, info_hash, file_id, audio_index=0, subtitle_index=-1, *, session_id=None, duration=None, audio=None, subtitles=None):
         if not self.ffmpeg:
             raise RuntimeError("ffmpeg is required to play this TorBox container in a browser.")
-        media_id = f"tb{info_hash[:16]}f{file_id}"
+        media_id = f"tb{info_hash[:16]}f{file_id}a{audio_index}s{subtitle_index + 1}"
         output_dir = HLS_ROOT / media_id
         playlist = output_dir / "master.m3u8"
-        session_id = secrets.token_urlsafe(18)
+        session_id = session_id or secrets.token_urlsafe(18)
         if output_dir.exists():
             shutil.rmtree(output_dir)
         output_dir.mkdir(parents=True)
+        video_mapping = ["-map", "0:v:0"]
+        selected_subtitle = (subtitles or [])[subtitle_index] if 0 <= subtitle_index < len(subtitles or []) else {}
+        subtitle_tracks = []
+        if subtitle_index >= 0 and str(selected_subtitle.get("codec", "")).lower() in TEXT_SUBTITLE_CODECS:
+            subtitle_path = output_dir / "subtitle.vtt"
+            extraction = subprocess.run(
+                [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", source_url, "-map", f"0:s:{subtitle_index}", "-c:s", "webvtt", str(subtitle_path)],
+                capture_output=True, text=True, timeout=60, check=False,
+            )
+            if extraction.returncode or not subtitle_path.is_file():
+                raise RuntimeError((extraction.stderr or "Could not prepare the selected subtitle track.").strip())
+            subtitle_tracks.append({"kind": "subtitles", "src": f"/media/{media_id}/subtitle.vtt", "srclang": selected_subtitle.get("lang") or "und", "label": selected_subtitle.get("title") or selected_subtitle.get("lang") or "Subtitles", "default": True})
+        elif subtitle_index >= 0:
+            escaped = source_url.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+            video_mapping = ["-vf", f"subtitles='{escaped}':si={subtitle_index}", "-map", "0:v:0"]
         args = [
-            self.ffmpeg, "-hide_banner", "-y", "-i", source_url, "-map", "0:v:0", "-map", "0:a:0?",
+            self.ffmpeg, "-hide_banner", "-y", "-i", source_url, *video_mapping, "-map", f"0:a:{audio_index}?",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-maxrate", "5M", "-bufsize", "10M",
             "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-f", "hls", "-hls_time", "4",
             "-hls_playlist_type", "event", "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4",
@@ -782,7 +855,8 @@ class UnarrServer(ThreadingHTTPServer):
             self.streams[session_id] = {
                 "kind": "torbox", "status": "buffering", "phase": "transcoding", "message": "Preparing TorBox HLS…",
                 "progress": 0, "url": None, "error": None, "process": process, "started_at": time.monotonic(),
-                "playlist": playlist, "media_url": f"/media/{media_id}/master.m3u8", "tracks": [], "audio": {},
+                "playlist": playlist, "media_url": f"/media/{media_id}/master.m3u8", "tracks": subtitle_tracks,
+                "audio": (audio or [{}])[audio_index] if audio_index < len(audio or []) else {}, "durationSeconds": duration,
             }
         threading.Thread(target=self.watch_library_stream, args=(session_id,), name=f"torbox-hls-{process.pid}", daemon=True).start()
         return session_id
@@ -1452,6 +1526,8 @@ class UnarrServer(ThreadingHTTPServer):
             response = {key: item[key] for key in ("status", "phase", "message", "progress", "url", "error")}
             response["tracks"] = item.get("tracks", [])
             response["audio"] = item.get("audio")
+            response["availableAudio"] = item.get("availableAudio", [])
+            response["availableSubtitles"] = item.get("availableSubtitles", [])
             response["durationSeconds"] = item.get("durationSeconds")
             response["elapsedSeconds"] = round(time.monotonic() - item["started_at"])
             if item.get("kind") != "library":
