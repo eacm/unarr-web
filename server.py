@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -13,6 +14,8 @@ import shutil
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -22,6 +25,7 @@ WEB_ROOT = ROOT / "web"
 DATA_ROOT = Path(os.environ.get("UNARR_DATA_DIR", Path.home() / "Library" / "Application Support" / "unarr"))
 LIBRARY_CACHE = DATA_ROOT / "library.json"
 HLS_ROOT = Path(os.environ.get("UNARR_WEB_HLS_DIR", ROOT / ".cache" / "hls"))
+TRAKT_IMAGE_ROOT = ROOT / ".cache" / "trakt-images"
 INFO_HASH = re.compile(r"^(?:[a-fA-F0-9]{40}|[A-Z2-7a-z2-7]{32})$")
 STREAM_URL = re.compile(r"Open this URL in your player:\s*(https?://\S+)")
 BUFFER_PROGRESS = re.compile(r"Buffering:\s*(\d+)%")
@@ -58,6 +62,10 @@ class UnarrHandler(SimpleHTTPRequestHandler):
             return self.search(parse_qs(request.query))
         if request.path == "/api/library":
             return self.library()
+        if request.path == "/api/trakt/dashboard":
+            return self.trakt_dashboard()
+        if request.path.startswith("/api/trakt/image/"):
+            return self.trakt_image(request.path[len("/api/trakt/image/"):], head_only=False)
         if request.path.startswith("/api/stream/"):
             return self.stream_status(request.path[len("/api/stream/"):])
         if request.path.startswith("/media/"):
@@ -68,6 +76,8 @@ class UnarrHandler(SimpleHTTPRequestHandler):
         request = urlparse(self.path)
         if request.path.startswith("/media/"):
             return self.serve_media(request.path, head_only=True)
+        if request.path.startswith("/api/trakt/image/"):
+            return self.trakt_image(request.path[len("/api/trakt/image/"):], head_only=True)
         return super().do_HEAD()
 
     def do_POST(self):
@@ -109,6 +119,28 @@ class UnarrHandler(SimpleHTTPRequestHandler):
             "transcode": {"available": bool(self.server.ffmpeg and self.server.ffprobe), "ffmpeg": self.server.ffmpeg},
             "scan": self.server.get_scan_state(),
         })
+
+    def trakt_dashboard(self):
+        try:
+            return self.send_json(self.server.get_trakt_dashboard())
+        except Exception as error:
+            return self.error_json(502, f"Trakt dashboard unavailable: {error}")
+
+    def trakt_image(self, image_id, head_only=False):
+        if not re.fullmatch(r"[a-f0-9]{32}", image_id):
+            return self.error_json(404, "Artwork not found.")
+        try:
+            path = self.server.get_trakt_image(image_id)
+        except (LookupError, OSError, urllib.error.URLError) as error:
+            return self.error_json(404, f"Artwork unavailable: {error}")
+        self.send_response(200)
+        self.send_header("Content-Type", "image/webp")
+        self.send_header("Content-Length", str(path.stat().st_size))
+        self.send_header("Cache-Control", "public, max-age=604800")
+        self.end_headers()
+        if not head_only:
+            with path.open("rb") as image:
+                shutil.copyfileobj(image, self.wfile)
 
     def start_library_stream(self, body):
         item_id = body.get("itemId", "")
@@ -270,7 +302,118 @@ class UnarrServer(ThreadingHTTPServer):
         self.ffmpeg = shutil.which("ffmpeg")
         self.ffprobe = shutil.which("ffprobe")
         HLS_ROOT.mkdir(parents=True, exist_ok=True)
+        TRAKT_IMAGE_ROOT.mkdir(parents=True, exist_ok=True)
+        self.trakt_client_id = os.environ.get("TRAKT_CLIENT_ID", "")
+        self.trakt_access_token = os.environ.get("TRAKT_ACCESS_TOKEN", "")
+        self.trakt_cache = None
+        self.trakt_cache_time = 0
+        self.trakt_lock = threading.Lock()
+        self.trakt_images = {}
         super().__init__(address, handler)
+
+    def trakt_request(self, path, authenticated=False):
+        if not self.trakt_client_id:
+            raise RuntimeError("TRAKT_CLIENT_ID is not configured")
+        if authenticated and not self.trakt_access_token:
+            raise PermissionError("Connect a Trakt account to load personal sections")
+        separator = "&" if "?" in path else "?"
+        url = f"https://api.trakt.tv{path}{separator}extended=full"
+        headers = {"trakt-api-version": "2", "trakt-api-key": self.trakt_client_id, "Content-Type": "application/json", "User-Agent": "unarr-web/0.1"}
+        if self.trakt_access_token:
+            headers["Authorization"] = f"Bearer {self.trakt_access_token}"
+        request = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as error:
+            if error.code in {401, 403}:
+                raise PermissionError("Trakt authorization is missing or expired") from error
+            raise RuntimeError(f"Trakt returned HTTP {error.code}") from error
+
+    def get_trakt_dashboard(self):
+        with self.trakt_lock:
+            if self.trakt_cache and time.monotonic() - self.trakt_cache_time < 300:
+                return self.trakt_cache
+        sections = [
+            ("continue", "Continue watching", "/sync/playback/movies?limit=20", True),
+            ("watchlist", "Watchlist", "/sync/watchlist/movies?limit=20", True),
+            ("history", "History", "/sync/history/movies?limit=20", True),
+            ("collection", "Collection", "/sync/collection/movies?limit=20", True),
+            ("ratings", "Ratings", "/users/me/ratings/movies?limit=20", True),
+            ("recommendations", "Recommendations", "/recommendations/movies?limit=20", True),
+            ("trending", "Trending", "/movies/trending?limit=20", False),
+            ("popular", "Popular", "/movies/popular?limit=20", False),
+            ("anticipated", "Anticipated", "/movies/anticipated?limit=20", False),
+            ("lists", "Custom lists", "/users/me/lists?limit=20", True),
+        ]
+        if not self.trakt_client_id:
+            rows = [{"id": key, "title": title, "items": [], "locked": True} for key, title, _, _ in sections]
+            return {"configured": False, "authenticated": False, "sections": rows, "message": "Set TRAKT_CLIENT_ID and TRAKT_ACCESS_TOKEN to connect Trakt."}
+
+        def load(section):
+            key, title, path, auth = section
+            if auth and not self.trakt_access_token:
+                return {"id": key, "title": title, "items": [], "locked": True}
+            try:
+                values = self.trakt_request(path, authenticated=auth)
+                return {"id": key, "title": title, "items": [self.normalize_trakt_item(value, key) for value in values[:20]]}
+            except Exception as error:
+                return {"id": key, "title": title, "items": [], "error": str(error), "locked": auth}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+            rows = list(pool.map(load, sections))
+        dashboard = {"configured": True, "authenticated": bool(self.trakt_access_token), "sections": rows}
+        with self.trakt_lock:
+            self.trakt_cache = dashboard
+            self.trakt_cache_time = time.monotonic()
+        return dashboard
+
+    def normalize_trakt_item(self, value, section):
+        media = value.get("movie") or value.get("show") or value.get("episode") or value
+        title = media.get("title") or value.get("name") or "Untitled"
+        images = media.get("images") or value.get("images") or {}
+        image_source = self.pick_trakt_image(images, "fanart") or self.pick_trakt_image(images, "poster") or self.pick_trakt_image(images, "thumb")
+        image_url = self.register_trakt_image(image_source) if image_source else None
+        progress = value.get("progress")
+        rating = value.get("rating") or media.get("rating")
+        return {
+            "title": title, "year": media.get("year"), "overview": media.get("overview"),
+            "ids": media.get("ids", {}), "image": image_url, "progress": progress,
+            "rating": rating, "listedAt": value.get("listed_at"), "watchedAt": value.get("watched_at"),
+            "plays": value.get("plays"), "section": section,
+        }
+
+    @staticmethod
+    def pick_trakt_image(images, kind):
+        values = images.get(kind) or []
+        if isinstance(values, list) and values:
+            return values[0]
+        return values if isinstance(values, str) else None
+
+    def register_trakt_image(self, source):
+        source = source if source.startswith("https://") else "https://" + source.lstrip("/")
+        image_id = hashlib.sha256(source.encode()).hexdigest()[:32]
+        with self.trakt_lock:
+            self.trakt_images[image_id] = source
+        return f"/api/trakt/image/{image_id}"
+
+    def get_trakt_image(self, image_id):
+        path = TRAKT_IMAGE_ROOT / f"{image_id}.webp"
+        if path.is_file():
+            return path
+        with self.trakt_lock:
+            source = self.trakt_images.get(image_id)
+        if not source:
+            raise LookupError("unknown artwork")
+        request = urllib.request.Request(source, headers={"User-Agent": "unarr-web/0.1"})
+        with urllib.request.urlopen(request, timeout=20) as response:
+            content = response.read(8 * 1024 * 1024 + 1)
+        if len(content) > 8 * 1024 * 1024:
+            raise OSError("artwork exceeds 8 MB")
+        temporary = path.with_suffix(".tmp")
+        temporary.write_bytes(content)
+        temporary.replace(path)
+        return path
 
     def server_close(self):
         with self.stream_lock:

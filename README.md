@@ -16,10 +16,21 @@ Open <http://127.0.0.1:8787>. To use a specific binary:
 python3 server.py --unarr /path/to/unarr
 ```
 
+## Trakt
+
+Create a Trakt API application, then provide its client ID. Add an OAuth access token to unlock personal shelves such as Continue watching, Watchlist, History, Collection, Ratings, Recommendations, and Custom lists. Public Trending, Popular, and Anticipated shelves only need the client ID.
+
+```sh
+TRAKT_CLIENT_ID=your-client-id TRAKT_ACCESS_TOKEN=your-access-token python3 server.py
+```
+
+The Discover screen caches dashboard data for five minutes. Trakt artwork is proxied and cached locally under `.cache/trakt-images`; the browser never hotlinks Trakt's image hosts.
+
 ## Current scope
 
 - Verify and display the locally installed unarr version
 - Search movies and shows with type, quality, and sort filters
+- Browse Trakt continue-watching, watchlist, history, collection, ratings, recommendations, trending, popular, anticipated, and custom-list shelves
 - Queue a selected release for download
 - Stream a selected release in the browser with automatic buffering and cleanup
 - Browse the local scanned library and play it through same-origin HLS

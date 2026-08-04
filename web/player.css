@@ -19,6 +19,26 @@ body { background: radial-gradient(circle at 65% 0%, #17221c 0, var(--paper) 38%
 .card { box-shadow: 0 12px 34px #0002; }
 dialog { box-shadow: 0 30px 90px #000b; }
 
+.trakt-dashboard { margin: 0 0 42px; }
+.trakt-loading, .trakt-setup { border: 1px solid var(--line); border-radius: 14px; background: var(--card); color: var(--muted); padding: 18px; }
+.trakt-setup { display: flex; align-items: baseline; gap: 12px; margin-bottom: 28px; }
+.trakt-setup strong { color: var(--ink); }
+.trakt-row { margin: 0 0 30px; }
+.trakt-row-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 11px; }
+.trakt-row-head h2 { margin: 0; font: 600 24px Georgia,serif; }
+.trakt-row-head span { color: var(--muted); font-size: 12px; }
+.trakt-strip { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(250px, 31%); gap: 12px; overflow-x: auto; padding: 1px 1px 12px; scroll-snap-type: x proximity; scrollbar-color: var(--line) transparent; }
+.trakt-card, .trakt-placeholder { position: relative; min-height: 142px; overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: var(--art), linear-gradient(135deg,#26342d,#111714); background-position: center; background-size: cover; color: white; scroll-snap-align: start; }
+.trakt-card { padding: 0; text-align: left; cursor: pointer; font: inherit; }
+.trakt-card:hover { border-color: var(--lime); transform: translateY(-1px); }
+.trakt-shade { position: absolute; inset: 0; background: linear-gradient(0deg,#050806e8 0,#05080622 75%); }
+.trakt-card-copy { position: absolute; inset: auto 15px 14px; display: flex; flex-direction: column; }
+.trakt-card-copy b { line-height: 1.2; }
+.trakt-card-copy small { color: #cad1cc; margin-top: 3px; }
+.trakt-progress { position: absolute; inset: auto 0 0; height: 4px; background: #ffffff33; }
+.trakt-progress i { display: block; height: 100%; background: var(--lime); }
+.trakt-placeholder { display: grid; place-items: center; min-width: 250px; padding: 20px; color: var(--muted); background: var(--card); }
+
 .release button.stream {
   margin-left: 3px;
   background: var(--ink);
@@ -27,6 +47,8 @@ dialog { box-shadow: 0 30px 90px #000b; }
 
 @media (max-width: 600px) {
   .release { flex-wrap: wrap; }
+  .trakt-setup { align-items: flex-start; flex-direction: column; gap: 3px; }
+  .trakt-strip { grid-auto-columns: 82%; }
 }
 
 header nav { display: flex; gap: 4px; }
