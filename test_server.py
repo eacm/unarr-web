@@ -148,6 +148,20 @@ class ValidationTests(unittest.TestCase):
         self.assertIn('<img src="${escapeHTML(item.image)}"', script)
         self.assertNotIn("--art:url", script)
 
+    def test_trakt_items_include_detail_identity(self):
+        server = object.__new__(UnarrServer)
+        server.trakt_lock = threading.Lock()
+        server.trakt_images = {}
+        item = server.normalize_trakt_item({"show": {"title": "Example", "ids": {"trakt": 42}}}, "start")
+        self.assertEqual(item["mediaType"], "show")
+        self.assertEqual(item["ids"]["trakt"], 42)
+
+    def test_trakt_details_reject_invalid_identifiers(self):
+        server = object.__new__(UnarrServer)
+        for media_type, trakt_id in (("episode", "1"), ("movie", "../../1"), ("show", "")):
+            with self.assertRaises(ValueError):
+                server.get_trakt_details(media_type, trakt_id)
+
 
 if __name__ == "__main__":
     unittest.main()

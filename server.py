@@ -71,6 +71,8 @@ class UnarrHandler(SimpleHTTPRequestHandler):
             return self.send_json(self.server.get_trakt_settings())
         if request.path == "/api/trakt/auth":
             return self.send_json(self.server.get_trakt_auth())
+        if request.path == "/api/trakt/details":
+            return self.trakt_details(parse_qs(request.query))
         if request.path == "/api/settings/backup":
             return self.settings_backup()
         if request.path.startswith("/api/trakt/image/"):
@@ -155,6 +157,21 @@ class UnarrHandler(SimpleHTTPRequestHandler):
             return self.send_json(self.server.get_trakt_dashboard())
         except Exception as error:
             return self.error_json(502, f"Trakt dashboard unavailable: {error}")
+
+    def trakt_details(self, params):
+        media_type = params.get("type", [""])[0]
+        trakt_id = params.get("id", [""])[0]
+        season_value = params.get("season", [None])[0]
+        try:
+            season = int(season_value) if season_value is not None else None
+        except ValueError:
+            return self.error_json(400, "Invalid season number.")
+        try:
+            return self.send_json(self.server.get_trakt_details(media_type, trakt_id, season))
+        except ValueError as error:
+            return self.error_json(400, str(error))
+        except (RuntimeError, PermissionError, urllib.error.URLError) as error:
+            return self.error_json(502, f"Could not load Trakt metadata: {error}")
 
     def settings_backup(self):
         payload = json.dumps(self.server.get_settings_backup(), indent=2).encode()
@@ -619,7 +636,14 @@ class UnarrServer(ThreadingHTTPServer):
         return dashboard
 
     def normalize_trakt_item(self, value, section):
-        media = value.get("movie") or value.get("show") or value.get("episode") or value
+        if value.get("movie"):
+            media_type, media = "movie", value["movie"]
+        elif value.get("show"):
+            media_type, media = "show", value["show"]
+        elif value.get("episode"):
+            media_type, media = "episode", value["episode"]
+        else:
+            media_type, media = "list", value
         title = media.get("title") or value.get("name") or "Untitled"
         images = media.get("images") or value.get("images") or {}
         image_source = self.pick_trakt_image(images, "poster") or self.pick_trakt_image(images, "fanart") or self.pick_trakt_image(images, "thumb")
@@ -631,8 +655,54 @@ class UnarrServer(ThreadingHTTPServer):
             "ids": media.get("ids", {}), "image": image_url, "progress": progress,
             "rating": rating, "listedAt": value.get("listed_at"), "watchedAt": value.get("watched_at"),
             "calendarAt": value.get("first_aired") or value.get("released"),
-            "plays": value.get("plays"), "section": section,
+            "plays": value.get("plays"), "section": section, "mediaType": media_type,
         }
+
+    def get_trakt_details(self, media_type, trakt_id, season=None):
+        if media_type not in {"movie", "show"} or not re.fullmatch(r"\d{1,12}", trakt_id):
+            raise ValueError("Invalid Trakt title identifier.")
+        plural = "movies" if media_type == "movie" else "shows"
+        media = self.trakt_request(f"/{plural}/{trakt_id}")
+        result = self.public_trakt_metadata(media, media_type)
+        if media_type == "movie":
+            return result
+        seasons = self.trakt_request(f"/shows/{trakt_id}/seasons")
+        result["seasons"] = [
+            {
+                "number": item.get("number"), "title": item.get("title") or ("Specials" if item.get("number") == 0 else f"Season {item.get('number')}"),
+                "episodeCount": item.get("episode_count"), "airedEpisodes": item.get("aired_episodes"),
+                "image": self.proxy_trakt_artwork(item.get("images") or {}, "poster"),
+            }
+            for item in seasons if isinstance(item.get("number"), int)
+        ]
+        if season is not None:
+            if season < 0 or season > 999:
+                raise ValueError("Invalid season number.")
+            episodes = self.trakt_request(f"/shows/{trakt_id}/seasons/{season}")
+            result["episodes"] = [
+                {
+                    "number": item.get("number"), "season": item.get("season"), "title": item.get("title") or f"Episode {item.get('number')}",
+                    "overview": item.get("overview"), "runtime": item.get("runtime"), "firstAired": item.get("first_aired"),
+                    "rating": item.get("rating"), "image": self.proxy_trakt_artwork(item.get("images") or {}, "screenshot"),
+                }
+                for item in episodes
+            ]
+        return result
+
+    def public_trakt_metadata(self, media, media_type):
+        return {
+            "mediaType": media_type, "title": media.get("title"), "year": media.get("year"),
+            "overview": media.get("overview"), "tagline": media.get("tagline"), "runtime": media.get("runtime"),
+            "rating": media.get("rating"), "votes": media.get("votes"), "certification": media.get("certification"),
+            "genres": media.get("genres") or [], "status": media.get("status"), "network": media.get("network"),
+            "released": media.get("released") or media.get("first_aired"), "trailer": media.get("trailer"),
+            "ids": media.get("ids") or {}, "poster": self.proxy_trakt_artwork(media.get("images") or {}, "poster"),
+            "fanart": self.proxy_trakt_artwork(media.get("images") or {}, "fanart"),
+        }
+
+    def proxy_trakt_artwork(self, images, kind):
+        source = self.pick_trakt_image(images, kind)
+        return self.register_trakt_image(source) if source else None
 
     @staticmethod
     def pick_trakt_image(images, kind):

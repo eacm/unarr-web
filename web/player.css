@@ -9,6 +9,7 @@
   --line: #242824;
   --soft: #171b17;
 }
+[hidden] { display: none !important; }
 
 html { background: var(--paper); }
 body {
@@ -47,6 +48,19 @@ h1 em { color: var(--lime); font-style: normal; font-weight: inherit; }
 .release button.stream { margin-left: 3px; background: var(--ink); color: #10120f; }
 .release button { border-radius: 999px; }
 dialog { border-color: #ffffff16; background: #101310; box-shadow: 0 35px 100px #000c; }
+.title-dialog { width: min(1080px,calc(100% - 24px)); max-height: min(880px,92vh); overflow: auto; padding: 0; border-radius: 20px; }
+.title-close { position: sticky; float: right; top: 14px; right: 14px; z-index: 5; width: 38px; height: 38px; margin: 14px; border: 1px solid #ffffff20; border-radius: 50%; background: #070907cc; color: white; font-size: 24px; cursor: pointer; backdrop-filter: blur(12px); }
+#title-detail { position: relative; min-height: 420px; overflow: hidden; }
+.detail-loading { display: grid; min-height: 180px; place-items: center; padding: 30px; color: var(--muted); }
+.detail-backdrop { position: absolute; inset: 0 0 auto; width: 100%; height: 440px; object-fit: cover; opacity: .62; }
+.detail-shade { position: absolute; inset: 0; background: linear-gradient(180deg,#07090720 0,#101310 430px); }
+.detail-body { position: relative; display: grid; grid-template-columns: 210px 1fr; gap: 32px; padding: 210px clamp(24px,5vw,54px) 48px; }
+.detail-poster { width: 100%; aspect-ratio: 2/3; object-fit: cover; border-radius: 12px; box-shadow: 0 20px 60px #000a; }
+.detail-copy h2 { margin: 4px 0 8px; font-size: clamp(34px,5vw,58px); line-height: .98; letter-spacing: -.055em; }
+.detail-tagline { color: #d1d5d0; font-style: italic; }.detail-overview { max-width: 720px; color: #c0c5c0; }
+.detail-facts,.detail-genres { display: flex; flex-wrap: wrap; gap: 7px; margin: 18px 0; }.detail-facts span,.detail-genres span { border: 1px solid #ffffff17; border-radius: 999px; padding: 4px 9px; color: var(--muted); font-size: 12px; }
+.season-picker { display: block; margin-top: 28px; color: var(--muted); font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }.season-picker select { display: block; width: min(320px,100%); margin-top: 7px; border: 1px solid #ffffff18; border-radius: 9px; background: #080a08; color: var(--ink); padding: 10px; font: inherit; text-transform: none; }
+.episodes { display: grid; gap: 10px; margin-top: 16px; }.episode-card { display: grid; grid-template-columns: 150px 1fr; gap: 14px; overflow: hidden; border: 1px solid #ffffff10; border-radius: 11px; background: #090b09; }.episode-card img { width: 100%; height: 100%; min-height: 92px; object-fit: cover; }.episode-card > div { padding: 12px 14px 12px 0; }.episode-card b { display: block; }.episode-card small { color: var(--muted); }.episode-card p { margin: 6px 0 0; color: #adb2ad; font-size: 13px; }
 
 .trakt-dashboard { margin: 0 0 50px; padding-top: 48px; }
 .trakt-loading, .trakt-setup { border: 1px solid #ffffff10; border-radius: 15px; background: #ffffff08; color: var(--muted); padding: 18px; backdrop-filter: blur(12px); }
@@ -113,4 +127,5 @@ dialog { border-color: #ffffff16; background: #101310; box-shadow: 0 35px 100px 
   .library-tools { flex-wrap: wrap; }
   #transcode-state { width: 100%; }
   .settings-panel { grid-template-columns: 1fr; padding-top: 38px; }
+  .detail-body { display: block; padding-top: 180px; }.detail-poster { width: 120px; margin-bottom: 18px; }.detail-backdrop { height: 330px; }.detail-shade { background: linear-gradient(180deg,#07090720 0,#101310 330px); }.episode-card { grid-template-columns: 105px 1fr; }.episode-card p { display: none; }
 }
