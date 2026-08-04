@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -26,6 +27,7 @@ STREAM_URL = re.compile(r"Open this URL in your player:\s*(https?://\S+)")
 BUFFER_PROGRESS = re.compile(r"Buffering:\s*(\d+)%")
 DOWNLOAD_PROGRESS = re.compile(r"(\d+)%\s*\|\s*([^|]+)\|\s*Peers:\s*(\d+)\s*\|\s*Seeds:\s*(\d+)")
 METADATA_TIMEOUT_SECONDS = 60
+VIDEO_EXTENSIONS = {".mp4", ".m4v", ".mkv", ".avi", ".mov", ".webm", ".ts", ".m2ts", ".mpg", ".mpeg", ".wmv"}
 FILTERS = {
     "type": ("--type", {"movie", "show"}),
     "quality": ("--quality", {"480p", "720p", "1080p", "2160p"}),
@@ -97,12 +99,12 @@ class UnarrHandler(SimpleHTTPRequestHandler):
 
     def library(self):
         try:
-            cache = self.server.load_library()
+            cache = self.server.reconcile_library()
         except (OSError, json.JSONDecodeError) as error:
             return self.error_json(500, f"Could not read the unarr library: {error}")
         items = [self.server.public_library_item(item) for item in cache.get("items", [])]
         return self.send_json({
-            "items": items, "scannedAt": cache.get("scannedAt"),
+            "items": items, "scannedAt": cache.get("scannedAt"), "refreshedAt": cache.get("refreshedAt"),
             "transcode": {"available": bool(self.server.ffmpeg and self.server.ffprobe), "ffmpeg": self.server.ffmpeg},
         })
 
@@ -251,6 +253,7 @@ class UnarrServer(ThreadingHTTPServer):
         self.command_timeout = command_timeout
         self.streams = {}
         self.stream_lock = threading.Lock()
+        self.library_lock = threading.Lock()
         self.ffmpeg = shutil.which("ffmpeg")
         self.ffprobe = shutil.which("ffprobe")
         HLS_ROOT.mkdir(parents=True, exist_ok=True)
@@ -271,9 +274,57 @@ class UnarrServer(ThreadingHTTPServer):
         with LIBRARY_CACHE.open(encoding="utf-8") as handle:
             return json.load(handle)
 
+    def reconcile_library(self):
+        """Overlay Unarr's rich scan metadata onto the files present right now."""
+        with self.library_lock:
+            cache = self.load_library()
+            roots = []
+            if cache.get("path"):
+                roots.append(Path(cache["path"]))
+            roots.extend(Path(value) for value in os.environ.get("UNARR_LIBRARY_PATHS", "").split(os.pathsep) if value)
+            roots = list(dict.fromkeys(path for path in roots if path.is_dir()))
+            cached = {str(Path(item.get("filePath", ""))).casefold(): item for item in cache.get("items", [])}
+            live_items = []
+            for root in roots:
+                for current, directories, files in os.walk(root):
+                    directories[:] = [name for name in directories if not name.startswith(".")]
+                    for name in files:
+                        path = Path(current) / name
+                        if path.suffix.lower() not in VIDEO_EXTENSIONS:
+                            continue
+                        try:
+                            stat = path.stat()
+                        except OSError:
+                            continue
+                        previous = cached.get(str(path).casefold())
+                        item = dict(previous) if previous else self.basic_library_item(path, stat)
+                        if previous and previous.get("fileSize") != stat.st_size:
+                            item.pop("mediaInfo", None)
+                            item.pop("scanError", None)
+                        item.update({"filePath": str(path), "fileName": name, "fileSize": stat.st_size, "live": True, "indexed": previous is not None})
+                        live_items.append(item)
+            live_items.sort(key=lambda item: (item.get("title", "").casefold(), item.get("season", 0), item.get("episode", 0)))
+            return {**cache, "items": live_items, "refreshedAt": time.time(), "roots": [str(root) for root in roots]}
+
+    @staticmethod
+    def basic_library_item(path, stat):
+        stem = re.sub(r"[._]+", " ", path.stem)
+        year_match = re.search(r"\b(19\d{2}|20\d{2})\b", stem)
+        quality_match = re.search(r"\b(2160p|1080p|720p|480p)\b", stem, re.I)
+        year = year_match.group(1) if year_match else None
+        quality = quality_match.group(1).lower() if quality_match else None
+        episode = re.search(r"\bS(\d{1,2})E(\d{1,3})\b", stem, re.I)
+        title = re.split(r"\b(?:19\d{2}|20\d{2}|S\d{1,2}E\d{1,3}|2160p|1080p|720p|480p)\b", stem, maxsplit=1, flags=re.I)[0].strip(" -_([]{}") or path.stem
+        return {
+            "filePath": str(path), "fileName": path.name, "fileSize": stat.st_size,
+            "modTime": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stat.st_mtime)),
+            "title": title, "year": year, "quality": quality,
+            "season": int(episode.group(1)) if episode else None, "episode": int(episode.group(2)) if episode else None,
+        }
+
     @staticmethod
     def library_item_id(item):
-        return item.get("fingerprint") or __import__("hashlib").sha256(item.get("filePath", "").encode()).hexdigest()
+        return item.get("fingerprint") or hashlib.sha256(item.get("filePath", "").encode()).hexdigest()
 
     @staticmethod
     def public_library_item(item):
@@ -282,13 +333,13 @@ class UnarrServer(ThreadingHTTPServer):
             "fileName": item.get("fileName"), "fileSize": item.get("fileSize", 0),
             "year": item.get("year"), "season": item.get("season"), "episode": item.get("episode"),
             "quality": item.get("quality"), "codec": item.get("codec"), "mediaInfo": item.get("mediaInfo"),
-            "scanError": item.get("scanError"),
+            "scanError": item.get("scanError"), "indexed": item.get("indexed", True),
         }
 
     def create_library_stream(self, item_id, quality):
         if not self.ffmpeg or not self.ffprobe:
             raise RuntimeError("ffmpeg and ffprobe are required for browser HLS playback.")
-        item = next((value for value in self.load_library().get("items", []) if self.library_item_id(value) == item_id), None)
+        item = next((value for value in self.reconcile_library().get("items", []) if self.library_item_id(value) == item_id), None)
         if item is None:
             raise LookupError("Library item not found. Run 'unarr scan' to refresh the library.")
         source = Path(item.get("filePath", ""))

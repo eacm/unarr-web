@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from server import BUFFER_PROGRESS, DOWNLOAD_PROGRESS, FILTERS, INFO_HASH, STREAM_URL, UnarrServer
 
 
@@ -33,6 +34,12 @@ class ValidationTests(unittest.TestCase):
         public = UnarrServer.public_library_item(item)
         self.assertEqual(public["id"], "a" * 64)
         self.assertNotIn("filePath", public)
+
+    def test_live_item_metadata_from_filename(self):
+        item = UnarrServer.basic_library_item(Path("Example.Show.S02E03.2026.1080p.mkv"), SimpleNamespace(st_size=42, st_mtime=0))
+        self.assertEqual(item["title"], "Example Show")
+        self.assertEqual((item["season"], item["episode"]), (2, 3))
+        self.assertEqual((item["year"], item["quality"]), ("2026", "1080p"))
 
 
 if __name__ == "__main__":
