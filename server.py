@@ -73,6 +73,10 @@ class UnarrHandler(SimpleHTTPRequestHandler):
             return self.send_json(self.server.get_trakt_settings())
         if request.path == "/api/torrentclaw/settings":
             return self.send_json(self.server.get_torrentclaw_settings())
+        if request.path == "/api/ai/settings":
+            return self.send_json(self.server.get_ai_settings())
+        if request.path == "/api/library/matches/export":
+            return self.send_json(self.server.export_library_matches())
         if request.path == "/api/activity":
             return self.send_json({"items": self.server.get_activity()})
         if request.path == "/api/trakt/auth":
@@ -101,7 +105,7 @@ class UnarrHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in {"/api/download", "/api/stream", "/api/stream/tracks", "/api/library/stream", "/api/library/action", "/api/trakt/settings", "/api/trakt/auth", "/api/trakt/scrobble", "/api/trakt/watchlist", "/api/torrentclaw/settings", "/api/torrentclaw/releases", "/api/torrentclaw/debrid/play", "/api/torrentclaw/debrid/download", "/api/settings/restore"}:
+        if path not in {"/api/download", "/api/stream", "/api/stream/tracks", "/api/library/stream", "/api/library/action", "/api/library/ai-match", "/api/library/matches/import", "/api/trakt/settings", "/api/trakt/auth", "/api/trakt/scrobble", "/api/trakt/watchlist", "/api/torrentclaw/settings", "/api/ai/settings", "/api/torrentclaw/releases", "/api/torrentclaw/debrid/play", "/api/torrentclaw/debrid/download", "/api/settings/restore"}:
             return self.error_json(404, "Not found.")
         if not self.same_origin():
             return self.error_json(403, "Cross-origin requests are not allowed.")
@@ -129,6 +133,29 @@ class UnarrHandler(SimpleHTTPRequestHandler):
                 return self.error_json(400, str(error))
             except OSError as error:
                 return self.error_json(500, f"Could not save TorrentClaw settings: {error}")
+        if path == "/api/ai/settings":
+            try:
+                return self.send_json(self.server.save_ai_settings(body))
+            except ValueError as error:
+                return self.error_json(400, str(error))
+            except OSError as error:
+                return self.error_json(500, f"Could not save AI settings: {error}")
+        if path == "/api/library/ai-match":
+            try:
+                return self.send_json(self.server.ai_match_library(body))
+            except ValueError as error:
+                return self.error_json(400, str(error))
+            except PermissionError as error:
+                return self.error_json(401, str(error))
+            except (RuntimeError, OSError, urllib.error.URLError) as error:
+                return self.error_json(502, str(error))
+        if path == "/api/library/matches/import":
+            try:
+                return self.send_json(self.server.import_library_matches(body))
+            except ValueError as error:
+                return self.error_json(400, str(error))
+            except OSError as error:
+                return self.error_json(500, str(error))
         if path == "/api/torrentclaw/releases":
             try:
                 return self.send_json(self.server.find_torrentclaw_releases(body))
@@ -507,6 +534,8 @@ class UnarrServer(ThreadingHTTPServer):
         self.trakt_user = saved_trakt.get("user")
         self.torrentclaw_api_key = os.environ.get("TORRENTCLAW_API_KEY", saved_trakt.get("torrentclaw_api_key", ""))
         self.torbox_api_key = os.environ.get("TORBOX_API_KEY", saved_trakt.get("torbox_api_key", ""))
+        self.openai_api_key = os.environ.get("OPENAI_API_KEY", saved_trakt.get("openai_api_key", ""))
+        self.openai_model = saved_trakt.get("openai_model", "gpt-5.6-luna")
         self.library_links = saved_trakt.get("library_links", {}) if isinstance(saved_trakt.get("library_links", {}), dict) else {}
         self.trakt_auth = {"status": "idle"}
         self.trakt_auth_id = None
@@ -541,6 +570,7 @@ class UnarrServer(ThreadingHTTPServer):
             "user": self.trakt_user,
             "torrentclaw_api_key": getattr(self, "torrentclaw_api_key", ""),
             "torbox_api_key": getattr(self, "torbox_api_key", ""),
+            "openai_api_key": getattr(self, "openai_api_key", ""), "openai_model": getattr(self, "openai_model", "gpt-5.6-luna"),
             "library_links": getattr(self, "library_links", {}),
         }
         temporary = TRAKT_SETTINGS_FILE.with_suffix(".tmp")
@@ -560,6 +590,101 @@ class UnarrServer(ThreadingHTTPServer):
 
     def get_torrentclaw_settings(self):
         return {"configured": bool(self.torrentclaw_api_key), "hasApiKey": bool(self.torrentclaw_api_key), "hasTorBoxKey": bool(self.torbox_api_key), "debridProvider": "torbox" if self.torbox_api_key else "", "baseUrl": "https://torrentclaw.com"}
+
+    def get_ai_settings(self):
+        return {"configured": bool(self.openai_api_key), "hasApiKey": bool(self.openai_api_key), "model": self.openai_model}
+
+    def save_ai_settings(self, body):
+        api_key, model = body.get("apiKey", ""), body.get("model", "gpt-5.6-luna")
+        if not isinstance(api_key, str) or len(api_key.strip()) > 1000:
+            raise ValueError("Enter a valid OpenAI API key.")
+        if model not in {"gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"}:
+            raise ValueError("Choose a supported GPT-5.6 model.")
+        if api_key.strip():
+            self.openai_api_key = api_key.strip()
+        self.openai_model = model
+        self.write_trakt_settings()
+        return self.get_ai_settings()
+
+    def ai_match_library(self, body):
+        if not self.openai_api_key:
+            raise PermissionError("Add an OpenAI API key in Settings first.")
+        title, media_type, candidates = body.get("title"), body.get("type"), body.get("candidates")
+        files = body.get("files")
+        if not isinstance(title, str) or media_type not in {"movie", "show"} or not isinstance(files, list) or not isinstance(candidates, list):
+            raise ValueError("A valid ambiguous library title is required.")
+        safe_files = [{key: str(item.get(key) or "")[:500] for key in ("fileName", "folderTitle")} for item in files[:50] if isinstance(item, dict)]
+        safe_candidates = [{"traktId": item.get("traktId"), "title": str(item.get("title") or "")[:300], "year": item.get("year"), "type": item.get("type"), "score": item.get("score")} for item in candidates[:12] if isinstance(item, dict)]
+        schema = {
+            "type": "object", "additionalProperties": False,
+            "properties": {
+                "classification": {"type": "string", "enum": ["movie", "show", "episode", "extra", "unknown"]},
+                "traktId": {"type": ["integer", "null"]}, "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "reason": {"type": "string"},
+            }, "required": ["classification", "traktId", "confidence", "reason"],
+        }
+        prompt = {
+            "claimedType": media_type, "groupTitle": title[:300], "files": safe_files, "traktCandidates": safe_candidates,
+            "rules": "Use folder hierarchy over episode filenames. Mark bonus features, interviews, deleted scenes, trailers, samples, and featurettes as extra. Select only a supplied traktId. Return null if uncertain.",
+        }
+        payload = {
+            "model": self.openai_model, "store": False, "reasoning": {"effort": "low"},
+            "input": [{"role": "system", "content": "Classify media-library files and choose the correct supplied Trakt candidate conservatively."}, {"role": "user", "content": json.dumps(prompt)}],
+            "text": {"format": {"type": "json_schema", "name": "library_match", "strict": True, "schema": schema}},
+        }
+        request = urllib.request.Request(
+            "https://api.openai.com/v1/responses", data=json.dumps(payload).encode(), method="POST",
+            headers={"Authorization": f"Bearer {self.openai_api_key}", "Content-Type": "application/json", "User-Agent": "unarr-web/0.1"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                result = json.load(response)
+        except urllib.error.HTTPError as error:
+            detail = error.read(8192).decode(errors="replace")
+            try:
+                detail = json.loads(detail).get("error", {}).get("message") or detail
+            except json.JSONDecodeError:
+                pass
+            raise RuntimeError(f"OpenAI returned HTTP {error.code}: {detail}") from error
+        text_output = next((content.get("text") for item in result.get("output", []) if item.get("type") == "message" for content in item.get("content", []) if content.get("type") == "output_text"), None)
+        try:
+            decision = json.loads(text_output or "")
+        except json.JSONDecodeError as error:
+            raise RuntimeError("OpenAI returned an invalid match decision.") from error
+        valid_ids = {item.get("traktId") for item in safe_candidates}
+        if decision.get("traktId") not in valid_ids:
+            decision["traktId"] = None
+            decision["confidence"] = 0
+        return {"decision": decision, "model": result.get("model", self.openai_model), "usage": result.get("usage")}
+
+    def export_library_matches(self):
+        items = []
+        try:
+            cloud = self.get_cloud_library()
+        except RuntimeError:
+            cloud = []
+        local_cache = self.reconcile_library().get("items", [])
+        local = [dict(self.public_library_item(item), source="local", folderTitle=Path(item.get("filePath", "")).parent.name) for item in local_cache]
+        for item in cloud + local:
+            if item.get("linked") or item.get("id") in self.library_links:
+                continue
+            items.append({key: item.get(key) for key in ("id", "source", "title", "fileName", "folderTitle", "year", "season", "episode")})
+        return {"format": "unarr-web-library-matches", "version": 1, "instructions": "Add a mappings array containing itemId, type, traktId, and title. Only include confident movie/show matches; omit extras and uncertain files.", "items": items, "mappings": []}
+
+    def import_library_matches(self, body):
+        if body.get("format") != "unarr-web-library-matches" or body.get("version") != 1 or not isinstance(body.get("mappings"), list):
+            raise ValueError("This is not a supported unarr-web match manifest.")
+        imported = 0
+        for mapping in body["mappings"][:10000]:
+            if not isinstance(mapping, dict):
+                continue
+            item_id, media_type, trakt_id = mapping.get("itemId"), mapping.get("type"), mapping.get("traktId")
+            if not isinstance(item_id, str) or media_type not in {"movie", "show"} or isinstance(trakt_id, bool) or not isinstance(trakt_id, int) or trakt_id < 1:
+                continue
+            self.library_links[item_id] = {"type": media_type, "traktId": trakt_id, "title": str(mapping.get("title") or "Matched title")[:300], "image": str(mapping.get("image") or "")[:1000], "released": str(mapping.get("released") or "")[:40]}
+            imported += 1
+        self.write_trakt_settings()
+        return {"ok": True, "imported": imported}
 
     def save_torrentclaw_settings(self, body):
         api_key = body.get("apiKey", "")
@@ -590,6 +715,8 @@ class UnarrServer(ThreadingHTTPServer):
                 "user": self.trakt_user,
             },
             "torrentclaw": {"apiKey": getattr(self, "torrentclaw_api_key", ""), "torboxApiKey": getattr(self, "torbox_api_key", "")},
+            "ai": {"apiKey": getattr(self, "openai_api_key", ""), "model": getattr(self, "openai_model", "gpt-5.6-luna")},
+            "libraryLinks": getattr(self, "library_links", {}),
         }
 
     def restore_settings_backup(self, backup):
@@ -607,6 +734,11 @@ class UnarrServer(ThreadingHTTPServer):
         torbox_key = torrentclaw.get("torboxApiKey", "")
         if not isinstance(torrentclaw, dict) or not isinstance(api_key, str) or len(api_key) > 1000 or not isinstance(torbox_key, str) or len(torbox_key) > 1000:
             raise ValueError("The backup contains invalid TorrentClaw settings.")
+        ai = backup.get("ai") or {}
+        openai_key, openai_model = ai.get("apiKey", ""), ai.get("model", "gpt-5.6-luna")
+        library_links = backup.get("libraryLinks") or {}
+        if not isinstance(ai, dict) or not isinstance(openai_key, str) or len(openai_key) > 1000 or openai_model not in {"gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"} or not isinstance(library_links, dict):
+            raise ValueError("The backup contains invalid AI or library-match settings.")
         with self.trakt_lock:
             self.trakt_client_id = trakt.get("clientId", "")
             self.trakt_client_secret = trakt.get("clientSecret", "")
@@ -618,6 +750,9 @@ class UnarrServer(ThreadingHTTPServer):
             self.trakt_cache = None
             self.torrentclaw_api_key = api_key
             self.torbox_api_key = torbox_key
+            self.openai_api_key = openai_key
+            self.openai_model = openai_model
+            self.library_links = library_links
         self.write_trakt_settings()
         return self.get_trakt_settings()
 

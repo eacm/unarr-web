@@ -118,7 +118,7 @@ dialog { border-color: #ffffff16; background: #101310; box-shadow: 0 35px 100px 
 .settings-card p { color: var(--muted); }
 .settings-card form { display: grid; gap: 14px; margin-top: 28px; }
 .settings-card label { color: var(--muted); font-size: 11px; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }
-.settings-card input { display: block; width: 100%; margin-top: 6px; border: 1px solid #ffffff12; border-radius: 10px; background: #080a08; color: var(--ink); padding: 12px; font: inherit; }
+.settings-card input,.settings-card select { display: block; width: 100%; margin-top: 6px; border: 1px solid #ffffff12; border-radius: 10px; background: #080a08; color: var(--ink); padding: 12px; font: inherit; }
 .settings-card button, .trakt-device a { padding: 11px 17px; text-align: center; text-decoration: none; cursor: pointer; }
 .settings-card button:disabled { opacity: .45; cursor: default; }
 .settings-card button.secondary { border: 1px solid #ffffff18; background: transparent; color: var(--ink); }

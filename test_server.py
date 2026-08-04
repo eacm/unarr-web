@@ -134,6 +134,23 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("rankedTraktMatches", app)
         self.assertIn("autoMatchLibrary", app)
         self.assertIn("folderTitle", (Path(__file__).parent / "server.py").read_text())
+        self.assertIn("isGenericExtra", app)
+        self.assertIn("reviewLibraryGroupWithAI", app)
+        self.assertIn('id="export-matches"', markup)
+
+    def test_ai_settings_never_expose_api_key(self):
+        server = object.__new__(UnarrServer)
+        server.openai_api_key = "secret"
+        server.openai_model = "gpt-5.6-luna"
+        settings = server.get_ai_settings()
+        self.assertTrue(settings["configured"])
+        self.assertTrue(settings["hasApiKey"])
+        self.assertNotIn("secret", json.dumps(settings))
+
+    def test_match_import_rejects_unknown_format(self):
+        server = object.__new__(UnarrServer)
+        with self.assertRaises(ValueError):
+            server.import_library_matches({"format": "unknown", "version": 1, "mappings": []})
 
     def test_trakt_artwork_uses_same_origin_proxy(self):
         server = object.__new__(UnarrServer)
