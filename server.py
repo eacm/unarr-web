@@ -844,7 +844,8 @@ class UnarrServer(ThreadingHTTPServer):
             escaped = source_url.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
             video_mapping = ["-vf", f"subtitles='{escaped}':si={subtitle_index}", "-map", "0:v:0"]
         args = [
-            self.ffmpeg, "-hide_banner", "-y", "-i", source_url, *video_mapping, "-map", f"0:a:{audio_index}?",
+            self.ffmpeg, "-hide_banner", "-y", "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_on_network_error", "1", "-reconnect_on_http_error", "4xx,5xx", "-reconnect_delay_max", "5",
+            "-i", source_url, *video_mapping, "-map", f"0:a:{audio_index}?",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-maxrate", "5M", "-bufsize", "10M",
             "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-f", "hls", "-hls_time", "4",
             "-hls_playlist_type", "event", "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4",
@@ -857,6 +858,7 @@ class UnarrServer(ThreadingHTTPServer):
                 "progress": 0, "url": None, "error": None, "process": process, "started_at": time.monotonic(),
                 "playlist": playlist, "media_url": f"/media/{media_id}/master.m3u8", "tracks": subtitle_tracks,
                 "audio": (audio or [{}])[audio_index] if audio_index < len(audio or []) else {}, "durationSeconds": duration,
+                "min_ready_segments": 8,
             }
         threading.Thread(target=self.watch_library_stream, args=(session_id,), name=f"torbox-hls-{process.pid}", daemon=True).start()
         return session_id
@@ -1471,7 +1473,8 @@ class UnarrServer(ThreadingHTTPServer):
         ready = False
         while process.poll() is None:
             segments = list(playlist.parent.glob("seg-*.m4s"))
-            if not ready and playlist.is_file() and segments:
+            minimum_segments = item.get("min_ready_segments", 1)
+            if not ready and playlist.is_file() and len(segments) >= minimum_segments:
                 ready = True
                 with self.stream_lock:
                     item["status"] = "ready"
@@ -1482,7 +1485,7 @@ class UnarrServer(ThreadingHTTPServer):
             elif not ready:
                 elapsed = round(time.monotonic() - item["started_at"])
                 with self.stream_lock:
-                    item["message"] = f"Encoding first HLS segment… {elapsed}s"
+                    item["message"] = f"Building playback buffer… {len(segments)}/{minimum_segments} segments · {elapsed}s"
             time.sleep(0.25)
         error_output = process.stderr.read().strip() if process.stderr else ""
         with self.stream_lock:
