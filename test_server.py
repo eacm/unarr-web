@@ -41,6 +41,11 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual((item["season"], item["episode"]), (2, 3))
         self.assertEqual((item["year"], item["quality"]), ("2026", "1080p"))
 
+    def test_library_signature_tracks_content_changes(self):
+        before = [{"filePath": "/media/a.mkv", "fileSize": 10, "modTime": "one"}]
+        after = [{"filePath": "/media/a.mkv", "fileSize": 11, "modTime": "two"}]
+        self.assertNotEqual(UnarrServer.library_signature(before), UnarrServer.library_signature(after))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -24,6 +24,7 @@ python3 server.py --unarr /path/to/unarr
 - Stream a selected release in the browser with automatic buffering and cleanup
 - Browse the local scanned library and play it through same-origin HLS
 - Reconcile the library against the filesystem every three seconds while open
+- Debounce filesystem changes and automatically run `unarr scan` to refresh metadata
 - View local CLI and daemon status
 
 Library HLS uses `ffmpeg` and `ffprobe` from `PATH`, transcodes to browser-safe H.264/AAC, and keeps completed encodes under `.cache/hls` for instant replay. Override that location with `UNARR_WEB_HLS_DIR`. Run `unarr scan ~/Media` to refresh the library index.

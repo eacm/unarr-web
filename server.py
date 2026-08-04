@@ -106,6 +106,7 @@ class UnarrHandler(SimpleHTTPRequestHandler):
         return self.send_json({
             "items": items, "scannedAt": cache.get("scannedAt"), "refreshedAt": cache.get("refreshedAt"),
             "transcode": {"available": bool(self.server.ffmpeg and self.server.ffprobe), "ffmpeg": self.server.ffmpeg},
+            "scan": self.server.get_scan_state(),
         })
 
     def start_library_stream(self, body):
@@ -254,6 +255,11 @@ class UnarrServer(ThreadingHTTPServer):
         self.streams = {}
         self.stream_lock = threading.Lock()
         self.library_lock = threading.Lock()
+        self.scan_lock = threading.Lock()
+        self.library_snapshot = None
+        self.scan_timer = None
+        self.scan_again_roots = None
+        self.scan_state = {"status": "idle", "message": "Watching for library changes"}
         self.ffmpeg = shutil.which("ffmpeg")
         self.ffprobe = shutil.which("ffprobe")
         HLS_ROOT.mkdir(parents=True, exist_ok=True)
@@ -265,6 +271,9 @@ class UnarrServer(ThreadingHTTPServer):
         for process in processes:
             if process is not None and process.poll() is None:
                 process.terminate()
+        with self.scan_lock:
+            if self.scan_timer is not None:
+                self.scan_timer.cancel()
         super().server_close()
 
     @staticmethod
@@ -301,10 +310,71 @@ class UnarrServer(ThreadingHTTPServer):
                         if previous and previous.get("fileSize") != stat.st_size:
                             item.pop("mediaInfo", None)
                             item.pop("scanError", None)
-                        item.update({"filePath": str(path), "fileName": name, "fileSize": stat.st_size, "live": True, "indexed": previous is not None})
+                        item.update({
+                            "filePath": str(path), "fileName": name, "fileSize": stat.st_size,
+                            "modTime": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stat.st_mtime)),
+                            "live": True, "indexed": previous is not None,
+                        })
                         live_items.append(item)
             live_items.sort(key=lambda item: (item.get("title", "").casefold(), item.get("season", 0), item.get("episode", 0)))
+            snapshot = self.library_signature(live_items)
+            if self.library_snapshot is None:
+                self.library_snapshot = snapshot
+            elif snapshot != self.library_snapshot:
+                self.library_snapshot = snapshot
+                self.schedule_library_scan(roots)
             return {**cache, "items": live_items, "refreshedAt": time.time(), "roots": [str(root) for root in roots]}
+
+    @staticmethod
+    def library_signature(items):
+        return tuple(sorted((item.get("filePath"), item.get("fileSize"), item.get("modTime")) for item in items))
+
+    def schedule_library_scan(self, roots):
+        with self.scan_lock:
+            if self.scan_state.get("status") == "running":
+                self.scan_again_roots = list(roots)
+                self.scan_state["message"] = "Scanning metadata; another change will be scanned next"
+                return
+            if self.scan_timer is not None:
+                self.scan_timer.cancel()
+            self.scan_state = {"status": "scheduled", "message": "Library changed; scan starts after files settle"}
+            self.scan_timer = threading.Timer(5, self.run_library_scan, args=(list(roots),))
+            self.scan_timer.daemon = True
+            self.scan_timer.start()
+
+    def run_library_scan(self, roots):
+        with self.scan_lock:
+            self.scan_timer = None
+            if self.scan_state.get("status") == "running":
+                return
+            self.scan_state = {"status": "running", "message": "Unarr is scanning library metadata…", "startedAt": time.time()}
+        failures = []
+        for root in roots:
+            try:
+                result = subprocess.run(
+                    [self.unarr_bin, "scan", str(root), "--no-color"], capture_output=True, text=True,
+                    timeout=2 * 60 * 60, check=False,
+                )
+                if result.returncode:
+                    failures.append((result.stderr or result.stdout).strip() or f"exit code {result.returncode}")
+            except (OSError, subprocess.TimeoutExpired) as error:
+                failures.append(str(error))
+        rerun_roots = None
+        with self.scan_lock:
+            if failures:
+                self.scan_state = {"status": "error", "message": failures[-1], "finishedAt": time.time()}
+                print(f"[library-scan] failed: {failures[-1]}")
+            else:
+                self.scan_state = {"status": "complete", "message": "Library metadata is up to date", "finishedAt": time.time()}
+                print("[library-scan] complete")
+            rerun_roots = self.scan_again_roots
+            self.scan_again_roots = None
+        if rerun_roots:
+            self.schedule_library_scan(rerun_roots)
+
+    def get_scan_state(self):
+        with self.scan_lock:
+            return dict(self.scan_state)
 
     @staticmethod
     def basic_library_item(path, stat):
