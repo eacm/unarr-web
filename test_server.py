@@ -134,6 +134,8 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("rankedTraktMatches", app)
         self.assertIn("autoMatchLibrary", app)
         self.assertIn("reflectLibraryMatch", app)
+        self.assertIn("libraryVisibleLimit", app)
+        self.assertIn("limit=${encodeURIComponent(libraryVisibleLimit)}", app)
         self.assertIn("folderTitle", (Path(__file__).parent / "server.py").read_text())
         self.assertIn("isGenericExtra", app)
         self.assertIn("reviewLibraryGroupWithAI", app)

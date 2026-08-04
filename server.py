@@ -286,7 +286,13 @@ class UnarrHandler(SimpleHTTPRequestHandler):
         else:
             selected.sort(key=lambda item: str(item.get("dateAdded") if sort == "added" else item.get("released") or item.get("year") or ""), reverse=True)
         total = len(selected)
-        selected = selected[:250]
+        try:
+            limit = int((((query or {}).get("limit") or ["250"])[0]))
+        except (TypeError, ValueError):
+            return self.error_json(400, "Invalid library limit.")
+        if limit < 250 or limit > 5000:
+            return self.error_json(400, "Library limit must be between 250 and 5000.")
+        selected = selected[:limit]
         return self.send_json({
             "items": selected, "total": total, "source": source, "counts": {"local": len(items), "cloud": len(cloud), "favorites": len(favorites)}, "scannedAt": cache.get("scannedAt"), "refreshedAt": cache.get("refreshedAt"),
             "transcode": {"available": bool(self.server.ffmpeg and self.server.ffprobe), "ffmpeg": self.server.ffmpeg},
