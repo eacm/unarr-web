@@ -500,7 +500,7 @@ class UnarrServer(ThreadingHTTPServer):
         if authenticated and not self.trakt_access_token:
             raise PermissionError("Connect a Trakt account to load personal sections")
         separator = "&" if "?" in path else "?"
-        url = f"https://api.trakt.tv{path}{separator}extended=full"
+        url = f"https://api.trakt.tv{path}{separator}extended=full,images"
         headers = {"trakt-api-version": "2", "trakt-api-key": self.trakt_client_id, "Content-Type": "application/json", "User-Agent": "unarr-web/0.1"}
         if self.trakt_access_token:
             headers["Authorization"] = f"Bearer {self.trakt_access_token}"
@@ -555,7 +555,7 @@ class UnarrServer(ThreadingHTTPServer):
         media = value.get("movie") or value.get("show") or value.get("episode") or value
         title = media.get("title") or value.get("name") or "Untitled"
         images = media.get("images") or value.get("images") or {}
-        image_source = self.pick_trakt_image(images, "fanart") or self.pick_trakt_image(images, "poster") or self.pick_trakt_image(images, "thumb")
+        image_source = self.pick_trakt_image(images, "poster") or self.pick_trakt_image(images, "fanart") or self.pick_trakt_image(images, "thumb")
         image_url = self.register_trakt_image(image_source) if image_source else None
         progress = value.get("progress")
         rating = value.get("rating") or media.get("rating")

@@ -82,6 +82,14 @@ class ValidationTests(unittest.TestCase):
         self.assertRegex(proxy, r"^/api/trakt/image/[a-f0-9]{32}$")
         self.assertEqual(server.trakt_images[proxy.rsplit("/", 1)[-1]], "https://example.test/art.webp")
 
+    def test_trakt_cards_prefer_posters(self):
+        server = object.__new__(UnarrServer)
+        server.trakt_lock = threading.Lock()
+        server.trakt_images = {}
+        item = server.normalize_trakt_item({"movie": {"title": "Example", "images": {"fanart": ["example.test/fanart.webp"], "poster": ["example.test/poster.webp"]}}}, "popular")
+        image_id = item["image"].rsplit("/", 1)[-1]
+        self.assertEqual(server.trakt_images[image_id], "https://example.test/poster.webp")
+
     def test_trakt_settings_never_expose_secrets(self):
         server = object.__new__(UnarrServer)
         server.trakt_client_id = "client-id"
