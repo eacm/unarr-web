@@ -72,6 +72,8 @@ class UnarrHandler(SimpleHTTPRequestHandler):
             return self.send_json(self.server.get_trakt_settings())
         if request.path == "/api/torrentclaw/settings":
             return self.send_json(self.server.get_torrentclaw_settings())
+        if request.path == "/api/activity":
+            return self.send_json({"items": self.server.get_activity()})
         if request.path == "/api/trakt/auth":
             return self.send_json(self.server.get_trakt_auth())
         if request.path == "/api/trakt/details":
@@ -98,7 +100,7 @@ class UnarrHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in {"/api/download", "/api/stream", "/api/library/stream", "/api/trakt/settings", "/api/trakt/auth", "/api/torrentclaw/settings", "/api/torrentclaw/play", "/api/settings/restore"}:
+        if path not in {"/api/download", "/api/stream", "/api/library/stream", "/api/trakt/settings", "/api/trakt/auth", "/api/torrentclaw/settings", "/api/torrentclaw/releases", "/api/torrentclaw/debrid/play", "/api/torrentclaw/debrid/download", "/api/settings/restore"}:
             return self.error_json(404, "Not found.")
         if not self.same_origin():
             return self.error_json(403, "Cross-origin requests are not allowed.")
@@ -126,11 +128,9 @@ class UnarrHandler(SimpleHTTPRequestHandler):
                 return self.error_json(400, str(error))
             except OSError as error:
                 return self.error_json(500, f"Could not save TorrentClaw settings: {error}")
-        if path == "/api/torrentclaw/play":
+        if path == "/api/torrentclaw/releases":
             try:
-                torrent = self.server.find_torrentclaw_release(body)
-                session_id = self.server.create_stream(torrent["infoHash"])
-                return self.send_json({"id": session_id, "status": "buffering", "release": torrent}, 202)
+                return self.send_json(self.server.find_torrentclaw_releases(body))
             except ValueError as error:
                 return self.error_json(400, str(error))
             except LookupError as error:
@@ -138,7 +138,18 @@ class UnarrHandler(SimpleHTTPRequestHandler):
             except RuntimeError as error:
                 return self.error_json(503, str(error))
             except (OSError, urllib.error.URLError) as error:
-                return self.error_json(502, f"Could not start TorrentClaw stream: {error}")
+                return self.error_json(502, f"Could not load TorrentClaw releases: {error}")
+        if path in {"/api/torrentclaw/debrid/play", "/api/torrentclaw/debrid/download"}:
+            info_hash = body.get("infoHash", "")
+            if not isinstance(info_hash, str) or not INFO_HASH.fullmatch(info_hash):
+                return self.error_json(400, "A valid torrent info hash is required.")
+            try:
+                result = self.server.start_torbox(info_hash, play=path.endswith("/play"))
+                return self.send_json(result, 200 if result.get("url") else 202)
+            except (RuntimeError, LookupError, PermissionError) as error:
+                return self.error_json(502, str(error))
+            except (OSError, urllib.error.URLError) as error:
+                return self.error_json(502, f"TorBox request failed: {error}")
         if path == "/api/trakt/auth":
             try:
                 return self.send_json(self.server.start_trakt_auth(), 202)
@@ -313,7 +324,7 @@ class UnarrHandler(SimpleHTTPRequestHandler):
 
         threading.Thread(
             target=self.server.watch_download,
-            args=(process, info_hash),
+            args=(process, info_hash, self.server.add_activity("local", info_hash, "Downloading with Unarr")),
             name=f"unarr-download-{process.pid}",
             daemon=True,
         ).start()
@@ -395,6 +406,8 @@ class UnarrServer(ThreadingHTTPServer):
         self.command_timeout = command_timeout
         self.streams = {}
         self.stream_lock = threading.Lock()
+        self.activity = []
+        self.activity_lock = threading.Lock()
         self.library_lock = threading.Lock()
         self.scan_lock = threading.Lock()
         self.library_snapshot = None
@@ -412,6 +425,7 @@ class UnarrServer(ThreadingHTTPServer):
         self.trakt_refresh_token = saved_trakt.get("refresh_token", "")
         self.trakt_user = saved_trakt.get("user")
         self.torrentclaw_api_key = os.environ.get("TORRENTCLAW_API_KEY", saved_trakt.get("torrentclaw_api_key", ""))
+        self.torbox_api_key = os.environ.get("TORBOX_API_KEY", saved_trakt.get("torbox_api_key", ""))
         self.trakt_auth = {"status": "idle"}
         self.trakt_auth_id = None
         self.trakt_cache = None
@@ -442,6 +456,7 @@ class UnarrServer(ThreadingHTTPServer):
             "access_token": self.trakt_access_token, "refresh_token": self.trakt_refresh_token,
             "user": self.trakt_user,
             "torrentclaw_api_key": getattr(self, "torrentclaw_api_key", ""),
+            "torbox_api_key": getattr(self, "torbox_api_key", ""),
         }
         temporary = TRAKT_SETTINGS_FILE.with_suffix(".tmp")
         temporary.write_text(json.dumps(payload, indent=2))
@@ -459,13 +474,17 @@ class UnarrServer(ThreadingHTTPServer):
         }
 
     def get_torrentclaw_settings(self):
-        return {"configured": bool(self.torrentclaw_api_key), "hasApiKey": bool(self.torrentclaw_api_key), "baseUrl": "https://torrentclaw.com"}
+        return {"configured": bool(self.torrentclaw_api_key), "hasApiKey": bool(self.torrentclaw_api_key), "hasTorBoxKey": bool(self.torbox_api_key), "debridProvider": "torbox" if self.torbox_api_key else "", "baseUrl": "https://torrentclaw.com"}
 
     def save_torrentclaw_settings(self, body):
         api_key = body.get("apiKey", "")
+        torbox_key = body.get("torboxApiKey", "")
         if not isinstance(api_key, str) or len(api_key.strip()) > 1000:
             raise ValueError("Enter a valid TorrentClaw API key.")
+        if not isinstance(torbox_key, str) or len(torbox_key.strip()) > 1000:
+            raise ValueError("Enter a valid TorBox API key.")
         self.torrentclaw_api_key = api_key.strip()
+        self.torbox_api_key = torbox_key.strip()
         self.write_trakt_settings()
         return self.get_torrentclaw_settings()
 
@@ -481,7 +500,7 @@ class UnarrServer(ThreadingHTTPServer):
                 "accessToken": self.trakt_access_token, "refreshToken": self.trakt_refresh_token,
                 "user": self.trakt_user,
             },
-            "torrentclaw": {"apiKey": getattr(self, "torrentclaw_api_key", "")},
+            "torrentclaw": {"apiKey": getattr(self, "torrentclaw_api_key", ""), "torboxApiKey": getattr(self, "torbox_api_key", "")},
         }
 
     def restore_settings_backup(self, backup):
@@ -496,7 +515,8 @@ class UnarrServer(ThreadingHTTPServer):
             raise ValueError("The backup contains an invalid user profile.")
         torrentclaw = backup.get("torrentclaw") or {}
         api_key = torrentclaw.get("apiKey", "")
-        if not isinstance(torrentclaw, dict) or not isinstance(api_key, str) or len(api_key) > 1000:
+        torbox_key = torrentclaw.get("torboxApiKey", "")
+        if not isinstance(torrentclaw, dict) or not isinstance(api_key, str) or len(api_key) > 1000 or not isinstance(torbox_key, str) or len(torbox_key) > 1000:
             raise ValueError("The backup contains invalid TorrentClaw settings.")
         with self.trakt_lock:
             self.trakt_client_id = trakt.get("clientId", "")
@@ -508,6 +528,7 @@ class UnarrServer(ThreadingHTTPServer):
             self.trakt_auth_id = None
             self.trakt_cache = None
             self.torrentclaw_api_key = api_key
+            self.torbox_api_key = torbox_key
         self.write_trakt_settings()
         return self.get_trakt_settings()
 
@@ -527,7 +548,7 @@ class UnarrServer(ThreadingHTTPServer):
                 raise RuntimeError("TorrentClaw rate limit reached; try again shortly") from error
             raise RuntimeError(f"TorrentClaw returned HTTP {error.code}") from error
 
-    def find_torrentclaw_release(self, body):
+    def find_torrentclaw_releases(self, body):
         if not self.torrentclaw_api_key:
             raise RuntimeError("Add a free TorrentClaw API key in Settings before playing.")
         media_type = body.get("type")
@@ -555,8 +576,99 @@ class UnarrServer(ThreadingHTTPServer):
         torrents = [torrent for item in response.get("results", []) for torrent in item.get("torrents", []) if INFO_HASH.fullmatch(str(torrent.get("infoHash", "")))]
         if not torrents:
             raise LookupError("TorrentClaw found no playable torrent for this title.")
-        best = max(torrents, key=lambda item: (item.get("qualityScore") or 0, item.get("seeders") or 0))
-        return {key: best.get(key) for key in ("infoHash", "rawTitle", "quality", "codec", "sourceType", "sizeBytes", "seeders", "qualityScore")}
+        fields = ("infoHash", "rawTitle", "quality", "codec", "sourceType", "sizeBytes", "seeders", "qualityScore", "hdrType", "audioCodec", "verified")
+        releases = [{key: torrent.get(key) for key in fields} for torrent in torrents]
+        cached = self.torbox_cached([item["infoHash"] for item in releases]) if getattr(self, "torbox_api_key", "") else set()
+        for release in releases:
+            release["instant"] = release["infoHash"].lower() in cached
+            release["debridProvider"] = "TorBox" if getattr(self, "torbox_api_key", "") else None
+        releases.sort(key=lambda item: (item["instant"], item.get("qualityScore") or 0, item.get("seeders") or 0), reverse=True)
+        return {"releases": releases, "debridConfigured": bool(getattr(self, "torbox_api_key", "")), "debridProvider": "TorBox" if getattr(self, "torbox_api_key", "") else None}
+
+    def find_torrentclaw_release(self, body):
+        """Compatibility helper for callers that still request one release."""
+        return self.find_torrentclaw_releases(body)["releases"][0]
+
+    def torbox_request(self, path, *, data=None, method=None):
+        if not self.torbox_api_key:
+            raise RuntimeError("Add a TorBox API key in Settings first.")
+        headers = {"Authorization": f"Bearer {self.torbox_api_key}", "Accept": "application/json", "User-Agent": "unarr-web/0.1"}
+        request = urllib.request.Request(f"https://api.torbox.app/v1/api/torrents/{path}", data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(request, timeout=25) as response:
+                payload = json.load(response)
+        except urllib.error.HTTPError as error:
+            raise PermissionError(f"TorBox returned HTTP {error.code}. Check the API key and account.") from error
+        if isinstance(payload, dict) and payload.get("success") is False:
+            raise RuntimeError(payload.get("detail") or payload.get("error") or "TorBox rejected the request.")
+        return payload.get("data", payload) if isinstance(payload, dict) else payload
+
+    def torbox_cached(self, hashes):
+        query = urllib.parse.urlencode({"hash": ",".join(hashes), "format": "object", "list_files": "false"})
+        data = self.torbox_request(f"checkcached?{query}")
+        if isinstance(data, dict):
+            return {str(key).lower() for key, value in data.items() if value}
+        return {str(item.get("hash", "")).lower() for item in (data or []) if isinstance(item, dict)}
+
+    def start_torbox(self, info_hash, *, play):
+        job_id = self.add_activity("torbox", info_hash, "Opening instant TorBox stream" if play else "Adding download to TorBox")
+        boundary = secrets.token_hex(16)
+        magnet = f"magnet:?xt=urn:btih:{info_hash}"
+        parts = [f"--{boundary}\r\nContent-Disposition: form-data; name=\"magnet\"\r\n\r\n{magnet}\r\n"]
+        if play:
+            parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"add_only_if_cached\"\r\n\r\ntrue\r\n")
+        parts.append(f"--{boundary}--\r\n")
+        data = "".join(parts).encode()
+        # torbox_request adds the auth headers; this content type is required for magnet form data.
+        url = "https://api.torbox.app/v1/api/torrents/createtorrent"
+        request = urllib.request.Request(url, data=data, headers={"Authorization": f"Bearer {self.torbox_api_key}", "Accept": "application/json", "Content-Type": f"multipart/form-data; boundary={boundary}", "User-Agent": "unarr-web/0.1"}, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                payload = json.load(response)
+            if payload.get("success") is False:
+                raise RuntimeError(payload.get("detail") or "TorBox could not add this release.")
+            created = payload.get("data") or {}
+            torrent_id = created.get("torrent_id") or created.get("id")
+            if not torrent_id:
+                raise RuntimeError("TorBox did not return a torrent ID.")
+            if not play:
+                self.update_activity(job_id, "active", "Queued in TorBox")
+                return {"status": "queued", "activityId": job_id}
+            listing = self.torbox_request("mylist?" + urllib.parse.urlencode({"id": torrent_id, "bypass_cache": "true"}))
+            item = listing[0] if isinstance(listing, list) and listing else listing
+            files = item.get("files", []) if isinstance(item, dict) else []
+            videos = [file for file in files if Path(str(file.get("name", ""))).suffix.lower() in VIDEO_EXTENSIONS]
+            chosen = max(videos or files, key=lambda file: file.get("size") or file.get("size_bytes") or 0, default=None)
+            if not chosen:
+                raise LookupError("TorBox has no playable video file for this release.")
+            file_id = chosen.get("id") or chosen.get("file_id")
+            link = self.torbox_request("requestdl?" + urllib.parse.urlencode({"torrent_id": torrent_id, "file_id": file_id, "redirect": "false"}))
+            url = link if isinstance(link, str) else (link or {}).get("url") or (link or {}).get("link")
+            if not url:
+                raise RuntimeError("TorBox did not return a playable CDN URL.")
+            self.update_activity(job_id, "complete", "Instant stream ready")
+            return {"status": "ready", "url": url, "activityId": job_id}
+        except Exception as error:
+            self.update_activity(job_id, "error", str(error))
+            raise
+
+    def add_activity(self, provider, info_hash, message):
+        item = {"id": secrets.token_urlsafe(8), "provider": provider, "infoHash": info_hash, "status": "active", "message": message, "createdAt": int(time.time())}
+        with self.activity_lock:
+            self.activity.insert(0, item)
+            del self.activity[50:]
+        return item["id"]
+
+    def update_activity(self, job_id, status, message):
+        with self.activity_lock:
+            for item in self.activity:
+                if item["id"] == job_id:
+                    item.update(status=status, message=message, updatedAt=int(time.time()))
+                    break
+
+    def get_activity(self):
+        with self.activity_lock:
+            return [dict(item) for item in self.activity]
 
     def save_trakt_settings(self, body):
         client_id = body.get("clientId", "").strip() if isinstance(body.get("clientId", ""), str) else ""
@@ -1227,14 +1339,23 @@ class UnarrServer(ThreadingHTTPServer):
         if url_match:
             print(f"[stream {session_id[:8]}] ready: {url_match.group(1)}")
 
-    @staticmethod
-    def watch_download(process, info_hash):
-        output, _ = process.communicate()
+    def watch_download(self, process, info_hash, job_id):
+        lines = []
+        for line in process.stdout or []:
+            lines.append(line)
+            match = DOWNLOAD_PROGRESS.search(line)
+            if match:
+                percent, speed, peers, seeds = match.groups()
+                self.update_activity(job_id, "active", f"{percent}% · {speed.strip()} · {peers} peers · {seeds} seeds")
+        process.wait()
+        output = "".join(lines)
         short_hash = info_hash[:8]
         if process.returncode:
             message = output.strip() or "no command output"
+            self.update_activity(job_id, "error", message[-500:])
             print(f"[download {short_hash}] failed ({process.returncode}): {message}")
         else:
+            self.update_activity(job_id, "complete", "Local Unarr download completed")
             print(f"[download {short_hash}] completed")
 
 

@@ -26,6 +26,7 @@ main { width: min(1320px,calc(100% - 48px)); }
 .brand { font-size: 20px; letter-spacing: -.05em; }
 .mark { width: 30px; height: 30px; border-radius: 50%; background: var(--lime); color: #0b0d0a; box-shadow: 0 0 28px #d7ff6430; }
 header nav { display: flex; gap: 3px; padding: 4px; border: 1px solid #ffffff0d; border-radius: 999px; background: #ffffff08; }
+.header-actions { display:flex; align-items:center; gap:8px; }.activity-button { position:relative; width:38px; height:38px; border:1px solid #ffffff14; border-radius:50%; background:#ffffff08; color:var(--ink); font-size:22px; cursor:pointer; transform:rotate(45deg) }.activity-button span { position:absolute; top:-4px; right:-4px; display:grid; min-width:18px; height:18px; place-items:center; border-radius:99px; background:var(--lime); color:#10120f; font:800 10px Inter; transform:rotate(-45deg) }
 .nav-button { border: 0; border-radius: 999px; padding: 7px 14px; background: transparent; color: var(--muted); font-weight: 650; cursor: pointer; }
 .nav-button.active { background: #f5f6f2; color: #10120f; box-shadow: none; }
 .pill { border-color: #ffffff14; background: #ffffff08; }
@@ -52,6 +53,7 @@ h1 em { color: var(--lime); font-style: normal; font-weight: inherit; }
 .release button { border-radius: 999px; }
 dialog { border-color: #ffffff16; background: #101310; box-shadow: 0 35px 100px #000c; }
 .title-dialog { width: min(1080px,calc(100% - 24px)); max-height: min(880px,92vh); overflow: auto; padding: 0; border-radius: 20px; }
+.release-dialog { width:min(880px,calc(100% - 24px)); max-height:90vh; padding:0; }.release-results,.activity-results { display:grid; gap:10px; max-height:70vh; overflow:auto; padding:18px; }.release-choice { display:grid; grid-template-columns:1fr auto; gap:18px; padding:18px; border:1px solid #ffffff12; border-radius:13px; background:#090b09; }.release-choice.instant { border-color:#d7ff6460; box-shadow:inset 3px 0 var(--lime); }.release-choice h3 { margin:8px 0 4px; font-size:15px; }.release-choice p { margin:0; color:var(--muted); font-size:12px; }.release-badges { display:flex; flex-wrap:wrap; gap:6px; }.release-badges span,.release-badges strong { border:1px solid #ffffff16; border-radius:99px; padding:3px 8px; color:var(--muted); font-size:10px; }.release-badges strong { border-color:#d7ff6460; color:var(--lime); }.release-actions { display:flex; flex-direction:column; justify-content:center; gap:7px; }.release-actions button { border:0; border-radius:99px; padding:9px 13px; background:var(--lime); color:#10120f; font-weight:800; cursor:pointer; }.release-actions button.secondary { border:1px solid #ffffff18; background:transparent; color:var(--ink); }.activity-dialog { width:min(520px,calc(100% - 24px)); padding:0; }.activity-item { display:grid; grid-template-columns:34px 1fr; gap:10px; padding:12px; border:1px solid #ffffff10; border-radius:11px; }.activity-item>span { display:grid; width:30px; height:30px; place-items:center; border-radius:50%; background:#ffffff0a; color:var(--lime); }.activity-item p { margin:2px 0; color:var(--muted); }.activity-item small { color:#717771; }.activity-item.error>span { color:#ff8b7c; }
 .title-close { position: absolute; top: 14px; right: 14px; z-index: 5; width: 38px; height: 38px; margin: 0; border: 1px solid #ffffff20; border-radius: 50%; background: #070907cc; color: white; font-size: 24px; cursor: pointer; backdrop-filter: blur(12px); }
 #title-detail { position: relative; min-height: 420px; overflow: hidden; }
 .detail-loading { display: grid; min-height: 180px; place-items: center; padding: 30px; color: var(--muted); }
@@ -132,4 +134,5 @@ dialog { border-color: #ffffff16; background: #101310; box-shadow: 0 35px 100px 
   #transcode-state { width: 100%; }
   .settings-panel { grid-template-columns: 1fr; padding-top: 38px; }
   .detail-body { display: block; padding-top: 180px; }.detail-poster { width: 120px; margin-bottom: 18px; }.detail-backdrop { height: 330px; }.detail-shade { background: linear-gradient(180deg,#07090720 0,#101310 330px); }.episode-card { grid-template-columns: 105px 1fr; }.episode-card p { display: none; }
+  .release-choice { grid-template-columns:1fr; }.release-actions { flex-direction:row; flex-wrap:wrap; }.header-actions .connection-button { max-width:120px; }
 }
