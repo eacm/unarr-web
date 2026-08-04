@@ -103,6 +103,20 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual([item["title"] for item in calendar["items"]], ["A Movie", "A Show"])
         self.assertEqual([item["mediaType"] for item in calendar["items"]], ["movie", "show"])
 
+    def test_watchlist_update_rejects_invalid_title(self):
+        server = object.__new__(UnarrServer)
+        server.trakt_access_token = "token"
+        with self.assertRaises(ValueError):
+            server.update_trakt_watchlist({"action": "add", "type": "movie", "traktId": "1"})
+
+    def test_poster_states_and_long_press_actions_exist(self):
+        app = (Path(__file__).parent / "web" / "app.js").read_text()
+        markup = (Path(__file__).parent / "web" / "index.html").read_text()
+        self.assertIn("poster-identifier watched", app)
+        self.assertIn("pointerdown", app)
+        self.assertIn("/api/trakt/watchlist", app)
+        self.assertIn('id="poster-actions"', markup)
+
     def test_trakt_artwork_uses_same_origin_proxy(self):
         server = object.__new__(UnarrServer)
         server.trakt_lock = threading.Lock()

@@ -101,7 +101,7 @@ class UnarrHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in {"/api/download", "/api/stream", "/api/stream/tracks", "/api/library/stream", "/api/trakt/settings", "/api/trakt/auth", "/api/trakt/scrobble", "/api/torrentclaw/settings", "/api/torrentclaw/releases", "/api/torrentclaw/debrid/play", "/api/torrentclaw/debrid/download", "/api/settings/restore"}:
+        if path not in {"/api/download", "/api/stream", "/api/stream/tracks", "/api/library/stream", "/api/trakt/settings", "/api/trakt/auth", "/api/trakt/scrobble", "/api/trakt/watchlist", "/api/torrentclaw/settings", "/api/torrentclaw/releases", "/api/torrentclaw/debrid/play", "/api/torrentclaw/debrid/download", "/api/settings/restore"}:
             return self.error_json(404, "Not found.")
         if not self.same_origin():
             return self.error_json(403, "Cross-origin requests are not allowed.")
@@ -164,6 +164,15 @@ class UnarrHandler(SimpleHTTPRequestHandler):
         if path == "/api/trakt/scrobble":
             try:
                 return self.send_json(self.server.scrobble_trakt(body))
+            except ValueError as error:
+                return self.error_json(400, str(error))
+            except PermissionError as error:
+                return self.error_json(401, str(error))
+            except (RuntimeError, urllib.error.URLError) as error:
+                return self.error_json(502, str(error))
+        if path == "/api/trakt/watchlist":
+            try:
+                return self.send_json(self.server.update_trakt_watchlist(body))
             except ValueError as error:
                 return self.error_json(400, str(error))
             except PermissionError as error:
@@ -1122,6 +1131,32 @@ class UnarrServer(ThreadingHTTPServer):
                 self.trakt_cache = None
         return {"ok": True, "action": result.get("action", action), "progress": result.get("progress", progress)}
 
+    def update_trakt_watchlist(self, body):
+        if not self.trakt_access_token:
+            raise PermissionError("Connect Trakt before changing your watchlist.")
+        action, media_type, trakt_id = body.get("action"), body.get("type"), body.get("traktId")
+        if action not in {"add", "remove"} or media_type not in {"movie", "show"}:
+            raise ValueError("A valid watchlist action and media type are required.")
+        if isinstance(trakt_id, bool) or not isinstance(trakt_id, int) or trakt_id < 1:
+            raise ValueError("A valid Trakt title ID is required.")
+        plural = "movies" if media_type == "movie" else "shows"
+        payload = {plural: [{"ids": {"trakt": trakt_id}}]}
+        endpoint = "sync/watchlist" if action == "add" else "sync/watchlist/remove"
+        request = urllib.request.Request(
+            f"https://api.trakt.tv/{endpoint}", data=json.dumps(payload).encode(), method="POST",
+            headers={"trakt-api-version": "2", "trakt-api-key": self.trakt_client_id, "Authorization": f"Bearer {self.trakt_access_token}", "Content-Type": "application/json", "User-Agent": "unarr-web/0.1"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                json.load(response)
+        except urllib.error.HTTPError as error:
+            if error.code in {401, 403}:
+                raise PermissionError("Trakt authorization is missing or expired.") from error
+            raise RuntimeError(f"Trakt watchlist returned HTTP {error.code}.") from error
+        with self.trakt_lock:
+            self.trakt_cache = None
+        return {"ok": True, "action": action, "type": media_type, "traktId": trakt_id}
+
     def get_trakt_dashboard(self):
         with self.trakt_lock:
             if self.trakt_cache and time.monotonic() - self.trakt_cache_time < 300:
@@ -1166,6 +1201,33 @@ class UnarrServer(ThreadingHTTPServer):
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
             rows = list(pool.map(load, sections))
+        if self.trakt_access_token:
+            status_paths = (
+                "/sync/watched/movies?limit=1000", "/sync/watched/shows?limit=1000",
+                "/sync/watchlist/movies?limit=1000", "/sync/watchlist/shows?limit=1000",
+            )
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                    watched_movies, watched_shows, watchlist_movies, watchlist_shows = list(pool.map(lambda path: self.trakt_request(path, authenticated=True), status_paths))
+                movie_watched = {item.get("movie", {}).get("ids", {}).get("trakt") for item in watched_movies}
+                movie_watchlist = {item.get("movie", {}).get("ids", {}).get("trakt") for item in watchlist_movies}
+                show_watchlist = {item.get("show", {}).get("ids", {}).get("trakt") for item in watchlist_shows}
+                show_progress = {}
+                for value in watched_shows:
+                    show = value.get("show") or {}
+                    watched_count = sum(len(season.get("episodes") or []) for season in value.get("seasons") or [])
+                    aired_count = int(show.get("aired_episodes") or 0)
+                    show_progress[show.get("ids", {}).get("trakt")] = "watched" if aired_count and watched_count >= aired_count else "in-progress"
+                for row in rows:
+                    for item in row.get("items") or []:
+                        trakt_id, media_type = item.get("ids", {}).get("trakt"), item.get("mediaType")
+                        item["watchlisted"] = trakt_id in (movie_watchlist if media_type == "movie" else show_watchlist)
+                        if media_type == "movie" and trakt_id in movie_watched:
+                            item["watchState"] = "watched"
+                        elif media_type == "show" and trakt_id in show_progress:
+                            item["watchState"] = show_progress[trakt_id]
+            except Exception as error:
+                print(f"[trakt] Could not load poster states: {error}")
         dashboard = {"configured": True, "authenticated": bool(self.trakt_access_token), "sections": rows}
         with self.trakt_lock:
             self.trakt_cache = dashboard
