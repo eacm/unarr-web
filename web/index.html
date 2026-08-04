@@ -9,8 +9,8 @@
 <body>
   <header><a class="brand" href="/"><span class="mark">u</span>unarr</a><nav><button id="discover-nav" class="nav-button active">Discover</button><button id="library-nav" class="nav-button">Library</button><button id="settings-nav" class="nav-button">Settings</button></nav><button id="connection" class="pill connection-button" type="button">Checking local CLI…</button></header>
   <main>
-    <form id="search-form" class="search"><input id="query" name="q" type="search" minlength="2" maxlength="120" placeholder="Search movies and shows…" autofocus required><button>Search</button>
-      <div class="filters"><select name="type"><option value="">Movies & shows</option><option value="movie">Movies</option><option value="show">Shows</option></select><select name="quality"><option value="">Any quality</option><option>2160p</option><option>1080p</option><option>720p</option><option>480p</option></select><select name="sort"><option value="relevance">Most relevant</option><option value="seeders">Most seeders</option><option value="rating">Highest rated</option><option value="year">Newest</option></select></div>
+    <form id="search-form" class="search" autocomplete="off"><input id="query" name="q" type="search" minlength="2" maxlength="120" placeholder="Search movies and shows…" autofocus required><button>Search</button>
+      <div id="trakt-search-results" class="search-matches" hidden></div>
     </form>
     <section id="trakt-dashboard" class="trakt-dashboard" aria-label="Trakt dashboard"><div class="trakt-loading">Loading Trakt…</div></section>
     <div id="library-tools" class="library-tools" hidden><input id="library-filter" type="search" placeholder="Filter your library…"><select id="library-quality"><option value="original">Original quality</option><option value="1080p">1080p</option><option value="720p">720p</option><option value="480p">480p</option></select><span id="transcode-state"></span></div>

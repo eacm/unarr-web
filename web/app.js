@@ -4,6 +4,7 @@ let libraryItems=[];
 let currentView='discover', libraryTimer=null;
 let librarySignature='';
 let traktAuthTimer=null;
+let traktSearchTimer=null,traktSearchRequest=0;
 const toast = (message) => { const el=$('#toast'); el.textContent=message; el.classList.add('show'); setTimeout(()=>el.classList.remove('show'),2600); };
 
 loadTraktDashboard();
@@ -38,12 +39,11 @@ fetch('/api/health').then(async response => {
   $('#connection').textContent=data.version; $('#connection').classList.add('ok');
 }).catch(error => { $('#connection').textContent='CLI unavailable'; $('#connection').title=error.message; });
 
-$('#search-form').addEventListener('submit', async event => {
-  event.preventDefault(); const params=new URLSearchParams(new FormData(event.currentTarget));$('#results-bar').hidden=false;
-  $('#results-title').textContent=`Searching for “${params.get('q')}”…`; results.innerHTML='<div class="empty"><p>Searching your catalog…</p></div>';
-  try { const response=await fetch(`/api/search?${params}`); const data=await response.json(); if(!response.ok) throw new Error(data.error); render(data.results || []); }
-  catch(error){ results.innerHTML=`<div class="empty"><p>${escapeHTML(error.message)}</p></div>`; $('#results-title').textContent='Search unavailable'; }
-});
+$('#search-form').addEventListener('submit',event=>{event.preventDefault();loadTraktMatches($('#query').value.trim())});
+$('#query').addEventListener('input',event=>{clearTimeout(traktSearchTimer);const query=event.target.value.trim();if(query.length<2){$('#trakt-search-results').hidden=true;return}traktSearchTimer=setTimeout(()=>loadTraktMatches(query),250)});
+async function loadTraktMatches(query){if(query.length<2)return;const requestId=++traktSearchRequest;const target=$('#trakt-search-results');target.hidden=false;target.innerHTML='<div class="search-match-state">Searching Trakt…</div>';try{const response=await fetch(`/api/trakt/search?q=${encodeURIComponent(query)}`);const data=await response.json();if(requestId!==traktSearchRequest)return;if(!response.ok)throw new Error(data.error);const items=data.results||[];target.innerHTML=items.length?items.map(item=>`<button class="search-match" type="button" data-trakt-id="${escapeHTML(item.ids?.trakt)}" data-trakt-type="${escapeHTML(item.mediaType)}">${item.image?`<img src="${escapeHTML(item.image)}" alt="">`:''}<span><b>${escapeHTML(item.title)}</b><small>${escapeHTML([item.mediaType,item.year,item.rating&&`★ ${Number(item.rating).toFixed(1)}`].filter(Boolean).join(' · '))}</small></span></button>`).join(''):'<div class="search-match-state">No Trakt matches found.</div>'}catch(error){if(requestId===traktSearchRequest)target.innerHTML=`<div class="search-match-state">${escapeHTML(error.message)}</div>`}}
+$('#trakt-search-results').addEventListener('click',event=>{const match=event.target.closest('[data-trakt-id]');if(!match)return;$('#trakt-search-results').hidden=true;openTraktDetails(match.dataset.traktType,match.dataset.traktId)});
+document.addEventListener('click',event=>{if(!event.target.closest('#search-form'))$('#trakt-search-results').hidden=true});
 
 $('#discover-nav').addEventListener('click',()=>setView('discover'));
 $('#library-nav').addEventListener('click',()=>setView('library'));

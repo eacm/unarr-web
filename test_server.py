@@ -170,6 +170,12 @@ class ValidationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 server.get_trakt_details(media_type, trakt_id)
 
+    def test_discover_uses_live_trakt_search(self):
+        script = (Path(__file__).parent / "web" / "app.js").read_text()
+        self.assertIn("/api/trakt/search?q=", script)
+        self.assertIn("loadTraktMatches", script)
+        self.assertNotIn("fetch(`/api/search?${params}`)", script)
+
 
 if __name__ == "__main__":
     unittest.main()

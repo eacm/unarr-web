@@ -16,6 +16,7 @@ import subprocess
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -73,6 +74,8 @@ class UnarrHandler(SimpleHTTPRequestHandler):
             return self.send_json(self.server.get_trakt_auth())
         if request.path == "/api/trakt/details":
             return self.trakt_details(parse_qs(request.query))
+        if request.path == "/api/trakt/search":
+            return self.trakt_search(parse_qs(request.query))
         if request.path == "/api/settings/backup":
             return self.settings_backup()
         if request.path.startswith("/api/trakt/image/"):
@@ -172,6 +175,15 @@ class UnarrHandler(SimpleHTTPRequestHandler):
             return self.error_json(400, str(error))
         except (RuntimeError, PermissionError, urllib.error.URLError) as error:
             return self.error_json(502, f"Could not load Trakt metadata: {error}")
+
+    def trakt_search(self, params):
+        query = params.get("q", [""])[0].strip()
+        if not 2 <= len(query) <= 120:
+            return self.error_json(400, "Search must be between 2 and 120 characters.")
+        try:
+            return self.send_json({"results": self.server.search_trakt(query)})
+        except (RuntimeError, PermissionError, urllib.error.URLError) as error:
+            return self.error_json(502, f"Could not search Trakt: {error}")
 
     def settings_backup(self):
         payload = json.dumps(self.server.get_settings_backup(), indent=2).encode()
@@ -688,6 +700,11 @@ class UnarrServer(ThreadingHTTPServer):
                 for item in episodes
             ]
         return result
+
+    def search_trakt(self, query):
+        encoded = urllib.parse.urlencode({"query": query, "limit": 10})
+        values = self.trakt_request(f"/search/movie,show?{encoded}")
+        return [self.normalize_trakt_item(value, "search") for value in values[:10]]
 
     def public_trakt_metadata(self, media, media_type):
         return {
