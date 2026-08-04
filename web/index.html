@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="A local web interface for unarr">
+  <title>unarr web</title><link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header><a class="brand" href="/"><span class="mark">u</span>unarr</a><div id="connection" class="pill">Checking local CLI…</div></header>
+  <main>
+    <section class="hero"><p class="eyebrow">YOUR LIBRARY, UNCOMPLICATED</p><h1>Find it. Queue it.<br><em>Keep it local.</em></h1><p class="lede">A calm interface for the unarr already running on your machine.</p></section>
+    <form id="search-form" class="search"><input id="query" name="q" type="search" minlength="2" maxlength="120" placeholder="Search movies and shows…" autofocus required><button>Search</button>
+      <div class="filters"><select name="type"><option value="">Movies & shows</option><option value="movie">Movies</option><option value="show">Shows</option></select><select name="quality"><option value="">Any quality</option><option>2160p</option><option>1080p</option><option>720p</option><option>480p</option></select><select name="sort"><option value="relevance">Most relevant</option><option value="seeders">Most seeders</option><option value="rating">Highest rated</option><option value="year">Newest</option></select></div>
+    </form>
+    <div class="bar"><h2 id="results-title">Ready to discover</h2><button id="status-button" class="text-button">System status</button></div>
+    <section id="results" class="results"><div class="empty"><span>⌕</span><p>Search the catalog to begin.</p></div></section>
+  </main>
+  <dialog id="status-dialog"><div class="dialog-head"><h2>Local unarr status</h2><button id="close-dialog" aria-label="Close">×</button></div><pre id="status-output">Loading…</pre></dialog>
+  <div id="toast" role="status"></div><script src="/app.js" defer></script>
+</body></html>
