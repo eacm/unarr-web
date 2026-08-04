@@ -70,7 +70,7 @@ class ValidationTests(unittest.TestCase):
         self.assertFalse(dashboard["configured"])
         self.assertEqual(
             [section["id"] for section in dashboard["sections"]],
-            ["continue", "watchlist", "history", "collection", "ratings", "recommendations", "trending", "popular", "anticipated", "lists"],
+            ["continue", "start", "calendar", "watchlist", "history", "collection", "ratings", "recommendations", "trending", "popular", "anticipated", "lists"],
         )
         self.assertTrue(all(section["locked"] for section in dashboard["sections"]))
 

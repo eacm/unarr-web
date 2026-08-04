@@ -21,11 +21,11 @@ async function loadTraktDashboard(){
 function renderTraktSection(section){
   const items=section.items||[];
   const status=section.locked?'Connect Trakt':section.error?'Unavailable':'';
-  const cards=items.length?items.map(item=>`<button class="trakt-card" data-trakt-title="${escapeHTML(item.title)}">${item.image?`<img src="${escapeHTML(item.image)}" alt="" loading="lazy">`:''}<span class="trakt-shade"></span><span class="trakt-card-copy"><b>${escapeHTML(item.title)}</b><small>${escapeHTML([item.year,item.rating&&`★ ${Number(item.rating).toFixed(1)}`].filter(Boolean).join(' · '))}</small></span>${item.progress!=null?`<progress class="trakt-progress" max="100" value="${Math.max(0,Math.min(100,Number(item.progress)||0))}"></progress>`:''}</button>`).join(''):`<div class="trakt-placeholder"><span>${escapeHTML(section.error||status||'Nothing here yet')}</span></div>`;
-  return `<section class="trakt-row"><div class="trakt-row-head"><h2>${escapeHTML(section.title)}</h2>${status?`<span>${escapeHTML(status)}</span>`:''}</div><div class="trakt-strip">${cards}</div></section>`;
+  const cards=items.length?items.map(item=>`<button class="trakt-card" data-trakt-title="${escapeHTML(item.title)}">${item.image?`<img src="${escapeHTML(item.image)}" alt="" loading="lazy">`:''}<span class="trakt-shade"></span><span class="trakt-card-copy"><b>${escapeHTML(item.title)}</b><small>${escapeHTML([item.calendarAt&&formatCalendarDate(item.calendarAt),item.year,item.rating&&`★ ${Number(item.rating).toFixed(1)}`].filter(Boolean).join(' · '))}</small></span>${item.progress!=null?`<progress class="trakt-progress" max="100" value="${Math.max(0,Math.min(100,Number(item.progress)||0))}"></progress>`:''}</button>`).join(''):`<div class="trakt-placeholder"><span>${escapeHTML(section.error||status||'Nothing here yet')}</span></div>`;
+  return `<section class="trakt-row"><div class="trakt-row-head"><h2>${escapeHTML(section.title)}</h2><div>${status?`<span>${escapeHTML(status)}</span>`:''}${items.length>0?`<button class="see-all" type="button">See all</button>`:''}</div></div><div class="trakt-strip">${cards}</div></section>`;
 }
 
-$('#trakt-dashboard').addEventListener('click',event=>{const card=event.target.closest('[data-trakt-title]');if(!card)return;$('#query').value=card.dataset.traktTitle;$('#search-form').requestSubmit();$('#results-title').scrollIntoView({behavior:'smooth',block:'start'});});
+$('#trakt-dashboard').addEventListener('click',event=>{const expand=event.target.closest('.see-all');if(expand){const row=expand.closest('.trakt-row');row.classList.toggle('expanded');expand.textContent=row.classList.contains('expanded')?'Show less':'See all';return}const card=event.target.closest('[data-trakt-title]');if(!card)return;$('#query').value=card.dataset.traktTitle;$('#search-form').requestSubmit();$('#results-title').scrollIntoView({behavior:'smooth',block:'start'});});
 
 fetch('/api/health').then(async response => {
   const data=await response.json(); if(!response.ok) throw new Error(data.error);
@@ -47,10 +47,10 @@ async function setView(view){
   currentView=view;clearTimeout(libraryTimer);
   const library=view==='library',settings=view==='settings',discover=view==='discover';
   $('#discover-nav').classList.toggle('active',discover);$('#library-nav').classList.toggle('active',library);$('#settings-nav').classList.toggle('active',settings);
-  $('.hero').hidden=settings;$('#search-form').hidden=!discover;$('#trakt-dashboard').hidden=!discover;$('#library-tools').hidden=!library;$('#settings-panel').hidden=!settings;$('.bar').hidden=settings;results.hidden=settings;
-  if(discover){$('#hero-eyebrow').textContent='MEDIA MANAGER · LOCAL PLAYER · PRIVATE';$('#hero-title').innerHTML='Your library.<br><em>Ready everywhere.</em>';$('#hero-lede').textContent='Everything you collect, organized and playing in seconds on every screen in your home.';$('#results-title').textContent='Ready to discover';results.innerHTML='<div class="empty"><span>⌕</span><p>Search the catalog to begin.</p></div>';return}
+  $('#search-form').hidden=!discover;$('#trakt-dashboard').hidden=!discover;$('#library-tools').hidden=!library;$('#settings-panel').hidden=!settings;$('.bar').hidden=settings;results.hidden=settings;
+  if(discover){$('#results-title').textContent='Ready to discover';results.innerHTML='<div class="empty"><span>⌕</span><p>Search the catalog to begin.</p></div>';return}
   if(settings){await loadTraktSettings();return}
-  librarySignature='';$('#hero-eyebrow').textContent='ON THIS MAC · LIVE';$('#hero-title').innerHTML='Your collection.<br><em>Ready to play.</em>';$('#hero-lede').textContent='The files on disk, reconciled live with Unarr metadata.';$('#results-title').textContent='Loading library…';results.innerHTML='<div class="empty"><p>Reading the local library…</p></div>';await refreshLibrary();
+  librarySignature='';$('#results-title').textContent='Loading library…';results.innerHTML='<div class="empty"><p>Reading the local library…</p></div>';await refreshLibrary();
 }
 
 async function loadTraktSettings(){
@@ -86,3 +86,4 @@ $('#status-button').addEventListener('click',async()=>{const dialog=$('#status-d
 function escapeHTML(value){return String(value??'').replace(/[&<>'"]/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]))}
 function formatBytes(value){const units=['B','KB','MB','GB','TB'];let size=Number(value)||0,index=0;while(size>=1000&&index<units.length-1){size/=1000;index++}return `${size.toFixed(index?1:0)} ${units[index]}`}
 function trackLabel(track,index,prefix){const imageSubtitles=['hdmv_pgs_subtitle','dvd_subtitle','dvb_subtitle'];const parts=[track.lang&&track.lang.toUpperCase(),track.title,track.codec,imageSubtitles.includes(track.codec)&&'burn-in',track.channels&&`${track.channels}ch`].filter(Boolean);return parts.join(' · ')||`${prefix} ${index+1}`}
+function formatCalendarDate(value){const date=new Date(value);return Number.isNaN(date.getTime())?'':date.toLocaleDateString(undefined,{month:'short',day:'numeric'})}

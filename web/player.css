@@ -48,15 +48,17 @@ h1 em { color: var(--lime); font-style: normal; font-weight: inherit; }
 .release button { border-radius: 999px; }
 dialog { border-color: #ffffff16; background: #101310; box-shadow: 0 35px 100px #000c; }
 
-.trakt-dashboard { margin: 0 0 50px; }
+.trakt-dashboard { margin: 0 0 50px; padding-top: 48px; }
 .trakt-loading, .trakt-setup { border: 1px solid #ffffff10; border-radius: 15px; background: #ffffff08; color: var(--muted); padding: 18px; backdrop-filter: blur(12px); }
 .trakt-setup { display: flex; align-items: baseline; gap: 12px; margin-bottom: 34px; }
 .trakt-setup strong { color: var(--ink); }
 .trakt-row { margin: 0 0 38px; }
 .trakt-row-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
 .trakt-row-head h2 { margin: 0; font-size: 23px; }
-.trakt-row-head span { color: var(--muted); font-size: 12px; }
+.trakt-row-head > div { display: flex; align-items: center; gap: 12px; }.trakt-row-head span { color: var(--muted); font-size: 12px; }
+.see-all { border: 0; background: transparent; color: var(--lime); font: 700 13px/1 Inter,ui-sans-serif,system-ui,sans-serif; cursor: pointer; }
 .trakt-strip { display: grid; grid-auto-flow: column; grid-auto-columns: clamp(150px,16vw,205px); gap: 14px; overflow-x: auto; padding: 1px 1px 14px; scroll-snap-type: x proximity; scrollbar-color: #343934 transparent; }
+.trakt-row.expanded .trakt-strip { grid-auto-flow: row; grid-template-columns: repeat(auto-fill,minmax(150px,1fr)); overflow: visible; scroll-snap-type: none; }
 .trakt-card, .trakt-placeholder { position: relative; min-height: 0; aspect-ratio: 2/3; overflow: hidden; border: 1px solid #ffffff12; border-radius: 13px; background: linear-gradient(135deg,#26321f,#101310); color: white; scroll-snap-align: start; }
 .trakt-card { padding: 0; text-align: left; cursor: pointer; font: inherit; transition: transform .2s,border-color .2s; }
 .trakt-card:hover { border-color: #d7ff6475; transform: scale(1.015); }
@@ -69,7 +71,7 @@ dialog { border-color: #ffffff16; background: #101310; box-shadow: 0 35px 100px 
 .trakt-progress::-webkit-progress-bar { background: #ffffff35; }.trakt-progress::-webkit-progress-value { background: var(--lime); box-shadow: 0 0 15px var(--lime); }.trakt-progress::-moz-progress-bar { background: var(--lime); }
 .trakt-placeholder { display: grid; place-items: center; min-width: 150px; padding: 20px; color: var(--muted); background: #101310; }
 
-.library-tools { border-color: #ffffff10; border-radius: 14px; background: #101310cc; backdrop-filter: blur(16px); }
+.library-tools { margin-top: 48px; border-color: #ffffff10; border-radius: 14px; background: #101310cc; backdrop-filter: blur(16px); }
 .library-tools input { color: var(--ink); }
 .library-tools select, .track-pickers select { border-color: #ffffff13; background: #080a08; }
 #transcode-state { color: var(--muted); font-size: 12px; }

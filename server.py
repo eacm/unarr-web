@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import datetime
 import hashlib
 import json
 import os
@@ -582,16 +583,18 @@ class UnarrServer(ThreadingHTTPServer):
             if self.trakt_cache and time.monotonic() - self.trakt_cache_time < 300:
                 return self.trakt_cache
         sections = [
-            ("continue", "Continue watching", "/sync/playback/movies?limit=20", True),
-            ("watchlist", "Watchlist", "/sync/watchlist/movies?limit=20", True),
-            ("history", "History", "/sync/history/movies?limit=20", True),
-            ("collection", "Collection", "/sync/collection/movies?limit=20", True),
-            ("ratings", "Ratings", "/users/me/ratings/movies?limit=20", True),
-            ("recommendations", "Recommendations", "/recommendations/movies?limit=20", True),
-            ("trending", "Trending", "/movies/trending?limit=20", False),
-            ("popular", "Popular", "/movies/popular?limit=20", False),
-            ("anticipated", "Anticipated", "/movies/anticipated?limit=20", False),
-            ("lists", "Custom lists", "/users/me/lists?limit=20", True),
+            ("continue", "Continue watching", "/sync/playback/movies?limit=50", True),
+            ("start", "Start watching", "/sync/watchlist/shows?limit=50", True),
+            ("calendar", "Calendar", f"/calendars/my/shows/{datetime.date.today().isoformat()}/14?limit=50", True),
+            ("watchlist", "Watchlist", "/sync/watchlist/movies?limit=50", True),
+            ("history", "History", "/sync/history/movies?limit=50", True),
+            ("collection", "Collection", "/sync/collection/movies?limit=50", True),
+            ("ratings", "Ratings", "/users/me/ratings/movies?limit=50", True),
+            ("recommendations", "Recommendations", "/recommendations/movies?limit=50", True),
+            ("trending", "Trending", "/movies/trending?limit=50", False),
+            ("popular", "Popular", "/movies/popular?limit=50", False),
+            ("anticipated", "Anticipated", "/movies/anticipated?limit=50", False),
+            ("lists", "Custom lists", "/users/me/lists?limit=50", True),
         ]
         if not self.trakt_client_id:
             rows = [{"id": key, "title": title, "items": [], "locked": True} for key, title, _, _ in sections]
@@ -603,7 +606,7 @@ class UnarrServer(ThreadingHTTPServer):
                 return {"id": key, "title": title, "items": [], "locked": True}
             try:
                 values = self.trakt_request(path, authenticated=auth)
-                return {"id": key, "title": title, "items": [self.normalize_trakt_item(value, key) for value in values[:20]]}
+                return {"id": key, "title": title, "items": [self.normalize_trakt_item(value, key) for value in values[:50]]}
             except Exception as error:
                 return {"id": key, "title": title, "items": [], "error": str(error), "locked": auth}
 
@@ -627,6 +630,7 @@ class UnarrServer(ThreadingHTTPServer):
             "title": title, "year": media.get("year"), "overview": media.get("overview"),
             "ids": media.get("ids", {}), "image": image_url, "progress": progress,
             "rating": rating, "listedAt": value.get("listed_at"), "watchedAt": value.get("watched_at"),
+            "calendarAt": value.get("first_aired") or value.get("released"),
             "plays": value.get("plays"), "section": section,
         }
 
