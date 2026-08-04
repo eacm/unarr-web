@@ -126,6 +126,28 @@ class ValidationTests(unittest.TestCase):
             self.assertEqual(settings_file.stat().st_mode & 0o777, 0o600)
             self.assertEqual(json.loads(settings_file.read_text())["client_id"], "client-id")
 
+    def test_settings_backup_is_scoped_to_connected_user(self):
+        server = object.__new__(UnarrServer)
+        server.trakt_client_id = "client-id"
+        server.trakt_client_secret = "client-secret"
+        server.trakt_access_token = "access-token"
+        server.trakt_refresh_token = "refresh-token"
+        server.trakt_user = {"username": "viewer", "name": "Viewer"}
+        backup = server.get_settings_backup()
+        self.assertEqual(backup["profile"], "viewer")
+        self.assertEqual(backup["format"], "unarr-web-settings")
+        self.assertEqual(backup["trakt"]["accessToken"], "access-token")
+
+    def test_restore_rejects_unknown_backup_format(self):
+        server = object.__new__(UnarrServer)
+        with self.assertRaisesRegex(ValueError, "supported"):
+            server.restore_settings_backup({"format": "something-else", "version": 1})
+
+    def test_trakt_cards_use_image_elements_under_csp(self):
+        script = (Path(__file__).parent / "web" / "app.js").read_text()
+        self.assertIn('<img src="${escapeHTML(item.image)}"', script)
+        self.assertNotIn("--art:url", script)
+
 
 if __name__ == "__main__":
     unittest.main()

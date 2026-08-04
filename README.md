@@ -18,7 +18,7 @@ python3 server.py --unarr /path/to/unarr
 
 ## Trakt
 
-Open **Settings** in the web interface, enter the client ID and client secret from a Trakt API application, and select **Connect Trakt**. The browser opens Trakt's device activation page and the app completes authorization after you enter the displayed code. Credentials and OAuth tokens are kept in `.cache/trakt-settings.json` with owner-only file permissions. Override that location with `UNARR_WEB_TRAKT_SETTINGS`.
+Open **Settings** in the web interface, enter the client ID and client secret from a Trakt API application, and select **Connect Trakt**. The browser opens Trakt's device activation page and the app completes authorization after you enter the displayed code. Connected-user settings are stored server-side in `.data/user-settings.json`, so they persist across browsers, with owner-only file permissions. Override that location with `UNARR_WEB_TRAKT_SETTINGS`. Settings can also be downloaded and restored from the web interface; backup files include private credentials and tokens and must be stored securely.
 
 ```sh
 TRAKT_CLIENT_ID=your-client-id TRAKT_CLIENT_SECRET=your-client-secret python3 server.py

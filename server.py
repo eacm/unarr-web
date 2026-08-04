@@ -26,7 +26,8 @@ DATA_ROOT = Path(os.environ.get("UNARR_DATA_DIR", Path.home() / "Library" / "App
 LIBRARY_CACHE = DATA_ROOT / "library.json"
 HLS_ROOT = Path(os.environ.get("UNARR_WEB_HLS_DIR", ROOT / ".cache" / "hls"))
 TRAKT_IMAGE_ROOT = ROOT / ".cache" / "trakt-images"
-TRAKT_SETTINGS_FILE = Path(os.environ.get("UNARR_WEB_TRAKT_SETTINGS", ROOT / ".cache" / "trakt-settings.json"))
+LEGACY_TRAKT_SETTINGS_FILE = ROOT / ".cache" / "trakt-settings.json"
+TRAKT_SETTINGS_FILE = Path(os.environ.get("UNARR_WEB_TRAKT_SETTINGS", ROOT / ".data" / "user-settings.json"))
 INFO_HASH = re.compile(r"^(?:[a-fA-F0-9]{40}|[A-Z2-7a-z2-7]{32})$")
 STREAM_URL = re.compile(r"Open this URL in your player:\s*(https?://\S+)")
 BUFFER_PROGRESS = re.compile(r"Buffering:\s*(\d+)%")
@@ -69,6 +70,8 @@ class UnarrHandler(SimpleHTTPRequestHandler):
             return self.send_json(self.server.get_trakt_settings())
         if request.path == "/api/trakt/auth":
             return self.send_json(self.server.get_trakt_auth())
+        if request.path == "/api/settings/backup":
+            return self.settings_backup()
         if request.path.startswith("/api/trakt/image/"):
             return self.trakt_image(request.path[len("/api/trakt/image/"):], head_only=False)
         if request.path.startswith("/api/stream/"):
@@ -87,13 +90,20 @@ class UnarrHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in {"/api/download", "/api/stream", "/api/library/stream", "/api/trakt/settings", "/api/trakt/auth"}:
+        if path not in {"/api/download", "/api/stream", "/api/library/stream", "/api/trakt/settings", "/api/trakt/auth", "/api/settings/restore"}:
             return self.error_json(404, "Not found.")
         if not self.same_origin():
             return self.error_json(403, "Cross-origin requests are not allowed.")
         body = self.read_json()
         if body is None:
             return self.error_json(400, "A valid JSON request is required.")
+        if path == "/api/settings/restore":
+            try:
+                return self.send_json(self.server.restore_settings_backup(body))
+            except ValueError as error:
+                return self.error_json(400, str(error))
+            except OSError as error:
+                return self.error_json(500, f"Could not restore settings: {error}")
         if path == "/api/trakt/settings":
             try:
                 return self.send_json(self.server.save_trakt_settings(body))
@@ -120,7 +130,7 @@ class UnarrHandler(SimpleHTTPRequestHandler):
     def read_json(self):
         try:
             length = int(self.headers.get("Content-Length", "0"))
-            if length < 1 or length > 4096:
+            if length < 1 or length > 65536:
                 raise ValueError
             value = json.loads(self.rfile.read(length))
             return value if isinstance(value, dict) else None
@@ -144,6 +154,16 @@ class UnarrHandler(SimpleHTTPRequestHandler):
             return self.send_json(self.server.get_trakt_dashboard())
         except Exception as error:
             return self.error_json(502, f"Trakt dashboard unavailable: {error}")
+
+    def settings_backup(self):
+        payload = json.dumps(self.server.get_settings_backup(), indent=2).encode()
+        username = re.sub(r"[^A-Za-z0-9_-]", "-", self.server.trakt_user_name() or "local")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Disposition", f'attachment; filename="unarr-web-{username}-backup.json"')
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
 
     def trakt_image(self, image_id, head_only=False):
         if not re.fullmatch(r"[a-f0-9]{32}", image_id):
@@ -346,11 +366,18 @@ class UnarrServer(ThreadingHTTPServer):
 
     @staticmethod
     def load_trakt_settings():
-        try:
-            value = json.loads(TRAKT_SETTINGS_FILE.read_text())
-            return value if isinstance(value, dict) else {}
-        except (OSError, json.JSONDecodeError):
-            return {}
+        for path in (TRAKT_SETTINGS_FILE, LEGACY_TRAKT_SETTINGS_FILE):
+            try:
+                value = json.loads(path.read_text())
+                if isinstance(value, dict):
+                    if path == LEGACY_TRAKT_SETTINGS_FILE and not TRAKT_SETTINGS_FILE.exists():
+                        TRAKT_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+                        TRAKT_SETTINGS_FILE.write_text(json.dumps(value, indent=2))
+                        TRAKT_SETTINGS_FILE.chmod(0o600)
+                    return value
+            except (OSError, json.JSONDecodeError):
+                continue
+        return {}
 
     def write_trakt_settings(self):
         TRAKT_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -371,7 +398,44 @@ class UnarrServer(ThreadingHTTPServer):
             "hasClientSecret": bool(self.trakt_client_secret),
             "authenticated": bool(self.trakt_access_token),
             "user": self.trakt_user,
+            "storage": "server",
         }
+
+    def trakt_user_name(self):
+        return (self.trakt_user or {}).get("username") or (self.trakt_user or {}).get("name")
+
+    def get_settings_backup(self):
+        return {
+            "format": "unarr-web-settings", "version": 1, "exportedAt": int(time.time()),
+            "profile": self.trakt_user_name() or "local",
+            "trakt": {
+                "clientId": self.trakt_client_id, "clientSecret": self.trakt_client_secret,
+                "accessToken": self.trakt_access_token, "refreshToken": self.trakt_refresh_token,
+                "user": self.trakt_user,
+            },
+        }
+
+    def restore_settings_backup(self, backup):
+        if backup.get("format") != "unarr-web-settings" or backup.get("version") != 1 or not isinstance(backup.get("trakt"), dict):
+            raise ValueError("This is not a supported unarr-web settings backup.")
+        trakt = backup["trakt"]
+        fields = ("clientId", "clientSecret", "accessToken", "refreshToken")
+        if any(not isinstance(trakt.get(field, ""), str) or len(trakt.get(field, "")) > 1000 for field in fields):
+            raise ValueError("The backup contains invalid Trakt credentials.")
+        user = trakt.get("user")
+        if user is not None and not isinstance(user, dict):
+            raise ValueError("The backup contains an invalid user profile.")
+        with self.trakt_lock:
+            self.trakt_client_id = trakt.get("clientId", "")
+            self.trakt_client_secret = trakt.get("clientSecret", "")
+            self.trakt_access_token = trakt.get("accessToken", "")
+            self.trakt_refresh_token = trakt.get("refreshToken", "")
+            self.trakt_user = user
+            self.trakt_auth = {"status": "idle"}
+            self.trakt_auth_id = None
+            self.trakt_cache = None
+        self.write_trakt_settings()
+        return self.get_trakt_settings()
 
     def save_trakt_settings(self, body):
         client_id = body.get("clientId", "").strip() if isinstance(body.get("clientId", ""), str) else ""
