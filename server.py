@@ -28,6 +28,7 @@ DATA_ROOT = Path(os.environ.get("UNARR_DATA_DIR", Path.home() / "Library" / "App
 LIBRARY_CACHE = DATA_ROOT / "library.json"
 HLS_ROOT = Path(os.environ.get("UNARR_WEB_HLS_DIR", ROOT / ".cache" / "hls"))
 TRAKT_IMAGE_ROOT = ROOT / ".cache" / "trakt-images"
+TORBOX_MEDIA_ROOT = ROOT / ".cache" / "torbox-media"
 LEGACY_TRAKT_SETTINGS_FILE = ROOT / ".cache" / "trakt-settings.json"
 TRAKT_SETTINGS_FILE = Path(os.environ.get("UNARR_WEB_TRAKT_SETTINGS", ROOT / ".data" / "user-settings.json"))
 INFO_HASH = re.compile(r"^(?:[a-fA-F0-9]{40}|[A-Z2-7a-z2-7]{32})$")
@@ -443,6 +444,7 @@ class UnarrServer(ThreadingHTTPServer):
         self.ffprobe = shutil.which("ffprobe")
         HLS_ROOT.mkdir(parents=True, exist_ok=True)
         TRAKT_IMAGE_ROOT.mkdir(parents=True, exist_ok=True)
+        TORBOX_MEDIA_ROOT.mkdir(parents=True, exist_ok=True)
         saved_trakt = self.load_trakt_settings()
         self.trakt_client_id = os.environ.get("TRAKT_CLIENT_ID", saved_trakt.get("client_id", ""))
         self.trakt_client_secret = os.environ.get("TRAKT_CLIENT_SECRET", saved_trakt.get("client_secret", ""))
@@ -816,7 +818,47 @@ class UnarrServer(ThreadingHTTPServer):
                 raise ValueError("The selected audio or subtitle track does not exist.")
             source_url, info_hash, file_id = item["source_url"], item["info_hash"], item["file_id"]
             duration = item.get("durationSeconds")
-        self.create_remote_hls(source_url, info_hash, file_id, audio_index, subtitle_index, session_id=session_id, duration=duration, audio=audio, subtitles=subtitles)
+        with self.stream_lock:
+            item["status"] = "buffering"
+            item["phase"] = "downloading"
+            item["message"] = "Caching TorBox media on this server…"
+            item["selected_audio_index"] = audio_index
+            item["selected_subtitle_index"] = subtitle_index
+        threading.Thread(
+            target=self.cache_and_start_remote_hls,
+            args=(session_id, source_url, info_hash, file_id, audio_index, subtitle_index, duration, audio, subtitles),
+            name=f"torbox-cache-{session_id[:8]}", daemon=True,
+        ).start()
+
+    def cache_and_start_remote_hls(self, session_id, source_url, info_hash, file_id, audio_index, subtitle_index, duration, audio, subtitles):
+        source_path = TORBOX_MEDIA_ROOT / f"{info_hash.lower()}-{file_id}.media"
+        partial_path = source_path.with_suffix(".part")
+        try:
+            if not source_path.is_file():
+                command = ["curl", "-sS", "--location", "--fail", "--retry", "30", "--retry-delay", "2", "--retry-all-errors", "--continue-at", "-", "--output", str(partial_path), source_url]
+                process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, start_new_session=True)
+                with self.stream_lock:
+                    item = self.streams.get(session_id)
+                    if not item or item.get("status") == "stopped":
+                        process.terminate()
+                        return
+                    item["process"] = process
+                _, error = process.communicate()
+                if process.returncode:
+                    raise RuntimeError((error or "TorBox cache download failed.").strip())
+                partial_path.replace(source_path)
+            with self.stream_lock:
+                item = self.streams.get(session_id)
+                if not item or item.get("status") == "stopped":
+                    return
+                item["process"] = None
+                item["message"] = "Preparing cached media for playback…"
+            self.create_remote_hls(str(source_path), info_hash, file_id, audio_index, subtitle_index, session_id=session_id, duration=duration, audio=audio, subtitles=subtitles)
+        except Exception as error:
+            with self.stream_lock:
+                item = self.streams.get(session_id)
+                if item and item.get("status") != "stopped":
+                    item.update(status="error", phase="error", error=str(error), message="Could not cache TorBox media")
 
     def create_remote_hls(self, source_url, info_hash, file_id, audio_index=0, subtitle_index=-1, *, session_id=None, duration=None, audio=None, subtitles=None):
         if not self.ffmpeg:
@@ -825,11 +867,19 @@ class UnarrServer(ThreadingHTTPServer):
         output_dir = HLS_ROOT / media_id
         playlist = output_dir / "master.m3u8"
         session_id = session_id or secrets.token_urlsafe(18)
+        selected_subtitle = (subtitles or [])[subtitle_index] if 0 <= subtitle_index < len(subtitles or []) else {}
+        cached_tracks = []
+        if subtitle_index >= 0 and (output_dir / "subtitle.vtt").is_file():
+            cached_tracks.append({"kind": "subtitles", "src": f"/media/{media_id}/subtitle.vtt", "srclang": selected_subtitle.get("lang") or "und", "label": selected_subtitle.get("title") or selected_subtitle.get("lang") or "Subtitles", "default": True})
+        cache_complete = playlist.is_file() and "#EXT-X-ENDLIST" in playlist.read_text(errors="ignore")
+        if cache_complete:
+            with self.stream_lock:
+                self.streams[session_id].update(status="ready", phase="ready", message="Loaded from persistent HLS cache", progress=100, url=f"/media/{media_id}/master.m3u8", process=None, tracks=cached_tracks, audio=(audio or [{}])[audio_index] if audio_index < len(audio or []) else {}, durationSeconds=duration)
+            return session_id
         if output_dir.exists():
             shutil.rmtree(output_dir)
         output_dir.mkdir(parents=True)
         video_mapping = ["-map", "0:v:0"]
-        selected_subtitle = (subtitles or [])[subtitle_index] if 0 <= subtitle_index < len(subtitles or []) else {}
         subtitle_tracks = []
         if subtitle_index >= 0 and str(selected_subtitle.get("codec", "")).lower() in TEXT_SUBTITLE_CODECS:
             subtitle_path = output_dir / "subtitle.vtt"
@@ -843,10 +893,10 @@ class UnarrServer(ThreadingHTTPServer):
         elif subtitle_index >= 0:
             escaped = source_url.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
             video_mapping = ["-vf", f"subtitles='{escaped}':si={subtitle_index}", "-map", "0:v:0"]
+        remote_input = source_url.startswith(("http://", "https://"))
+        connection_args = ["-rw_timeout", "15000000", "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_at_eof", "1", "-reconnect_on_network_error", "1", "-reconnect_on_http_error", "4xx,5xx", "-reconnect_delay_max", "3"] if remote_input else []
         args = [
-            self.ffmpeg, "-hide_banner", "-y", "-rw_timeout", "15000000", "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_at_eof", "1",
-            "-reconnect_on_network_error", "1", "-reconnect_on_http_error", "4xx,5xx", "-reconnect_delay_max", "3",
-            "-i", source_url, *(["-t", str(duration)] if duration else []), *video_mapping, "-map", f"0:a:{audio_index}?",
+            self.ffmpeg, "-hide_banner", "-y", *connection_args, "-i", source_url, *(["-t", str(duration)] if duration else []), *video_mapping, "-map", f"0:a:{audio_index}?",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-maxrate", "5M", "-bufsize", "10M",
             "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-f", "hls", "-hls_time", "4",
             "-hls_playlist_type", "event", "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4",
