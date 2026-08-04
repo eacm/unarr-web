@@ -100,7 +100,7 @@ class UnarrHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in {"/api/download", "/api/stream", "/api/library/stream", "/api/trakt/settings", "/api/trakt/auth", "/api/torrentclaw/settings", "/api/torrentclaw/releases", "/api/torrentclaw/debrid/play", "/api/torrentclaw/debrid/download", "/api/settings/restore"}:
+        if path not in {"/api/download", "/api/stream", "/api/library/stream", "/api/trakt/settings", "/api/trakt/auth", "/api/trakt/scrobble", "/api/torrentclaw/settings", "/api/torrentclaw/releases", "/api/torrentclaw/debrid/play", "/api/torrentclaw/debrid/download", "/api/settings/restore"}:
             return self.error_json(404, "Not found.")
         if not self.same_origin():
             return self.error_json(403, "Cross-origin requests are not allowed.")
@@ -158,6 +158,15 @@ class UnarrHandler(SimpleHTTPRequestHandler):
                 return self.send_json(self.server.start_trakt_auth(), 202)
             except urllib.error.HTTPError as error:
                 return self.error_json(502, getattr(error, "trakt_message", str(error)))
+            except (RuntimeError, urllib.error.URLError) as error:
+                return self.error_json(502, str(error))
+        if path == "/api/trakt/scrobble":
+            try:
+                return self.send_json(self.server.scrobble_trakt(body))
+            except ValueError as error:
+                return self.error_json(400, str(error))
+            except PermissionError as error:
+                return self.error_json(401, str(error))
             except (RuntimeError, urllib.error.URLError) as error:
                 return self.error_json(502, str(error))
         if path == "/api/library/stream":
@@ -745,7 +754,8 @@ class UnarrServer(ThreadingHTTPServer):
             if Path(file_name).suffix.lower() not in {".mp4", ".m4v", ".webm"}:
                 session_id = self.create_remote_hls(url, info_hash, file_id)
                 return {"status": "buffering", "id": session_id, "activityId": job_id}
-            return {"status": "ready", "url": url, "activityId": job_id}
+            session_id = self.create_direct_stream(url)
+            return {"status": "ready", "id": session_id, "activityId": job_id}
         except Exception as error:
             self.update_activity(job_id, "error", str(error))
             raise
@@ -775,6 +785,16 @@ class UnarrServer(ThreadingHTTPServer):
                 "playlist": playlist, "media_url": f"/media/{media_id}/master.m3u8", "tracks": [], "audio": {},
             }
         threading.Thread(target=self.watch_library_stream, args=(session_id,), name=f"torbox-hls-{process.pid}", daemon=True).start()
+        return session_id
+
+    def create_direct_stream(self, source_url):
+        session_id = secrets.token_urlsafe(18)
+        with self.stream_lock:
+            self.streams[session_id] = {
+                "kind": "torbox", "status": "ready", "phase": "ready", "message": "TorBox stream ready",
+                "progress": 100, "url": source_url, "error": None, "process": None,
+                "started_at": time.monotonic(), "tracks": [], "audio": {},
+            }
         return session_id
 
     def add_activity(self, provider, info_hash, message):
@@ -934,6 +954,44 @@ class UnarrServer(ThreadingHTTPServer):
             if error.code in {401, 403}:
                 raise PermissionError("Trakt authorization is missing or expired") from error
             raise RuntimeError(f"Trakt returned HTTP {error.code}") from error
+
+    def scrobble_trakt(self, body):
+        if not self.trakt_access_token:
+            raise PermissionError("Connect Trakt before enabling playback tracking.")
+        action = body.get("action")
+        media_type = body.get("type")
+        trakt_id = body.get("traktId")
+        progress = body.get("progress")
+        if action not in {"start", "pause", "stop"} or media_type not in {"movie", "show"}:
+            raise ValueError("Invalid Trakt scrobble event.")
+        if isinstance(trakt_id, bool) or not isinstance(trakt_id, int) or trakt_id < 1:
+            raise ValueError("A valid Trakt media ID is required.")
+        if isinstance(progress, bool) or not isinstance(progress, (int, float)) or not 0 <= progress <= 100:
+            raise ValueError("Scrobble progress must be between 0 and 100.")
+        payload = {"progress": round(float(progress), 2), "app_version": "0.1", "app_date": "2026-08-04"}
+        if media_type == "movie":
+            payload["movie"] = {"ids": {"trakt": trakt_id}}
+        else:
+            season, episode = body.get("season"), body.get("episode")
+            if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in (season, episode)):
+                raise ValueError("A valid season and episode are required.")
+            payload["show"] = {"ids": {"trakt": trakt_id}}
+            payload["episode"] = {"season": season, "number": episode}
+        request = urllib.request.Request(
+            f"https://api.trakt.tv/scrobble/{action}", data=json.dumps(payload).encode(), method="POST",
+            headers={"trakt-api-version": "2", "trakt-api-key": self.trakt_client_id, "Authorization": f"Bearer {self.trakt_access_token}", "Content-Type": "application/json", "User-Agent": "unarr-web/0.1"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                result = json.load(response)
+        except urllib.error.HTTPError as error:
+            if error.code in {401, 403}:
+                raise PermissionError("Trakt authorization is missing or expired.") from error
+            raise RuntimeError(f"Trakt scrobble returned HTTP {error.code}.") from error
+        if action == "stop":
+            with self.trakt_lock:
+                self.trakt_cache = None
+        return {"ok": True, "action": result.get("action", action), "progress": result.get("progress", progress)}
 
     def get_trakt_dashboard(self):
         with self.trakt_lock:
