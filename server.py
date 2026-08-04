@@ -408,6 +408,8 @@ class UnarrServer(ThreadingHTTPServer):
         self.stream_lock = threading.Lock()
         self.activity = []
         self.activity_lock = threading.Lock()
+        self.torbox_index = []
+        self.torbox_index_time = 0
         self.library_lock = threading.Lock()
         self.scan_lock = threading.Lock()
         self.library_snapshot = None
@@ -483,8 +485,10 @@ class UnarrServer(ThreadingHTTPServer):
             raise ValueError("Enter a valid TorrentClaw API key.")
         if not isinstance(torbox_key, str) or len(torbox_key.strip()) > 1000:
             raise ValueError("Enter a valid TorBox API key.")
-        self.torrentclaw_api_key = api_key.strip()
-        self.torbox_api_key = torbox_key.strip()
+        if api_key.strip():
+            self.torrentclaw_api_key = api_key.strip()
+        if torbox_key.strip():
+            self.torbox_api_key = torbox_key.strip()
         self.write_trakt_settings()
         return self.get_torrentclaw_settings()
 
@@ -572,6 +576,8 @@ class UnarrServer(ThreadingHTTPServer):
             if isinstance(episode, bool) or not isinstance(episode, int) or episode < 0 or episode > 9999:
                 raise ValueError("Select a valid episode.")
             params.update({"season": season, "episode": episode})
+        torbox_library = self.find_torbox_library(body) if getattr(self, "torbox_api_key", "") else []
+        torbox_search = self.search_torbox(body) if getattr(self, "torbox_api_key", "") else []
         response = self.torrentclaw_request(params)
         torrents = [torrent for item in response.get("results", []) for torrent in item.get("torrents", []) if INFO_HASH.fullmatch(str(torrent.get("infoHash", "")))]
         if not torrents:
@@ -582,8 +588,15 @@ class UnarrServer(ThreadingHTTPServer):
         for release in releases:
             release["instant"] = release["infoHash"].lower() in cached
             release["debridProvider"] = "TorBox" if getattr(self, "torbox_api_key", "") else None
+            release["sourceGroup"] = "torrentclaw"
         releases.sort(key=lambda item: (item["instant"], item.get("qualityScore") or 0, item.get("seeders") or 0), reverse=True)
-        return {"releases": releases, "debridConfigured": bool(getattr(self, "torbox_api_key", "")), "debridProvider": "TorBox" if getattr(self, "torbox_api_key", "") else None}
+        known = {item["infoHash"].lower() for item in torbox_library + torbox_search}
+        releases = [item for item in releases if item["infoHash"].lower() not in known]
+        return {"groups": [
+            {"id": "torbox-library", "title": "Cached in your TorBox", "releases": torbox_library},
+            {"id": "torbox-search", "title": "TorBox search", "releases": torbox_search},
+            {"id": "torrentclaw", "title": "TorrentClaw results", "releases": releases},
+        ], "releases": torbox_library + torbox_search + releases, "debridConfigured": bool(getattr(self, "torbox_api_key", "")), "debridProvider": "TorBox" if getattr(self, "torbox_api_key", "") else None}
 
     def find_torrentclaw_release(self, body):
         """Compatibility helper for callers that still request one release."""
@@ -609,6 +622,65 @@ class UnarrServer(ThreadingHTTPServer):
         if isinstance(data, dict):
             return {str(key).lower() for key, value in data.items() if value}
         return {str(item.get("hash", "")).lower() for item in (data or []) if isinstance(item, dict)}
+
+    def refresh_torbox_index(self):
+        if self.torbox_index and time.time() - self.torbox_index_time < 60:
+            return self.torbox_index
+        data = self.torbox_request("mylist?" + urllib.parse.urlencode({"bypass_cache": "true", "limit": 1000}))
+        self.torbox_index = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
+        self.torbox_index_time = time.time()
+        return self.torbox_index
+
+    @staticmethod
+    def torbox_release(item, source_group, *, instant=True):
+        info_hash = str(item.get("hash") or item.get("info_hash") or item.get("infoHash") or "")
+        if not INFO_HASH.fullmatch(info_hash):
+            return None
+        return {
+            "infoHash": info_hash, "rawTitle": item.get("name") or item.get("title") or item.get("raw_title") or info_hash,
+            "quality": item.get("quality"), "codec": item.get("codec"), "sourceType": item.get("source") or "TorBox",
+            "sizeBytes": item.get("size") or item.get("size_bytes"), "seeders": item.get("seeders") or 0,
+            "qualityScore": item.get("quality_score") or item.get("qualityScore") or 0, "instant": instant,
+            "debridProvider": "TorBox", "sourceGroup": source_group,
+        }
+
+    def find_torbox_library(self, body):
+        clean_title = re.sub(r"\s+s\d{1,3}e\d{1,4}$", "", body["title"], flags=re.IGNORECASE)
+        title = re.sub(r"[^a-z0-9]+", " ", clean_title.lower()).strip()
+        terms = [term for term in title.split() if len(term) > 1]
+        matches = []
+        for item in self.refresh_torbox_index():
+            name = re.sub(r"[^a-z0-9]+", " ", str(item.get("name", "")).lower())
+            state = str(item.get("download_state") or item.get("status") or "").lower()
+            if terms and all(term in name for term in terms) and state in {"cached", "completed", "uploading", "seeding"}:
+                release = self.torbox_release(item, "torbox-library")
+                if release:
+                    matches.append(release)
+        return matches[:20]
+
+    def search_torbox(self, body):
+        imdb_id = body.get("imdbId")
+        tmdb_id = body.get("tmdbId")
+        if isinstance(imdb_id, str) and re.fullmatch(r"tt\d{5,12}", imdb_id):
+            identity = f"imdb:{imdb_id}"
+        elif str(tmdb_id or "").isdigit():
+            identity = f"tmdb:{'movie' if body['type'] == 'movie' else 'tv'}:{tmdb_id}"
+        else:
+            return []
+        request = urllib.request.Request(
+            "https://search-api.torbox.app/torrents/" + urllib.parse.quote(identity, safe=":"),
+            headers={"Authorization": f"Bearer {self.torbox_api_key}", "Accept": "application/json", "User-Agent": "unarr-web/0.1"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                payload = json.load(response)
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
+            return []
+        values = payload.get("data") or payload.get("results") or payload.get("torrents") or payload if isinstance(payload, dict) else payload
+        if isinstance(values, dict):
+            values = values.get("torrents") or list(values.values())
+        releases = [self.torbox_release(item, "torbox-search", instant=bool(item.get("cached", True))) for item in (values or []) if isinstance(item, dict)]
+        return [item for item in releases if item][:20]
 
     def start_torbox(self, info_hash, *, play):
         job_id = self.add_activity("torbox", info_hash, "Opening instant TorBox stream" if play else "Adding download to TorBox")
