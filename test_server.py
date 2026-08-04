@@ -20,6 +20,11 @@ class ValidationTests(unittest.TestCase):
     def test_favicon_exists(self):
         self.assertTrue((Path(__file__).parent / "web" / "favicon.svg").is_file())
 
+    def test_dedicated_player_assets_exist(self):
+        web = Path(__file__).parent / "web"
+        for name in ("watch.html", "watch.js", "watch.css"):
+            self.assertTrue((web / name).is_file())
+
     def test_stream_ready_url(self):
         line = "Buffering: 100%  Open this URL in your player: http://192.168.1.4:9000/stream?t=secret"
         self.assertEqual(STREAM_URL.search(line).group(1), "http://192.168.1.4:9000/stream?t=secret")

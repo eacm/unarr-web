@@ -449,6 +449,7 @@ class UnarrServer(ThreadingHTTPServer):
         subtitle_url = self.prepare_subtitle(source, subtitle_index, output_dir, media_id) if subtitle_index >= 0 and not burn_subtitle else None
         selected_audio = audio_tracks[audio_index] if audio_index < len(audio_tracks) else {}
         selected_subtitle = subtitle_tracks[subtitle_index] if subtitle_index >= 0 else {}
+        duration_seconds = (media_info.get("video") or {}).get("duration")
         tracks = []
         if subtitle_url:
             tracks.append({
@@ -463,7 +464,7 @@ class UnarrServer(ThreadingHTTPServer):
                     "kind": "library", "status": "ready", "phase": "ready", "message": "Loaded from HLS cache",
                     "progress": 100, "url": f"/media/{media_id}/master.m3u8", "error": None,
                     "process": None, "started_at": time.monotonic(), "tracks": tracks,
-                    "audio": selected_audio,
+                    "audio": selected_audio, "durationSeconds": duration_seconds,
                 }
             return session_id
         heights = {"1080p": 1080, "720p": 720, "480p": 480}
@@ -494,6 +495,7 @@ class UnarrServer(ThreadingHTTPServer):
                 "progress": 0, "url": None, "error": None, "process": process, "started_at": time.monotonic(),
                 "playlist": playlist, "media_url": f"/media/{media_id}/master.m3u8",
                 "tracks": tracks, "audio": selected_audio,
+                "durationSeconds": duration_seconds,
             }
         threading.Thread(target=self.watch_library_stream, args=(session_id,), name=f"library-hls-{process.pid}", daemon=True).start()
         return session_id
@@ -580,6 +582,7 @@ class UnarrServer(ThreadingHTTPServer):
             response = {key: item[key] for key in ("status", "phase", "message", "progress", "url", "error")}
             response["tracks"] = item.get("tracks", [])
             response["audio"] = item.get("audio")
+            response["durationSeconds"] = item.get("durationSeconds")
             response["elapsedSeconds"] = round(time.monotonic() - item["started_at"])
             if item.get("kind") != "library":
                 response["metadataTimeoutSeconds"] = METADATA_TIMEOUT_SECONDS

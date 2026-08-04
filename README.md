@@ -31,6 +31,8 @@ Library HLS uses `ffmpeg` and `ffprobe` from `PATH`, transcodes to browser-safe 
 
 Scanned audio tracks can be selected before playback. Text subtitle formats are extracted or reused from Unarr's `.unarr` sidecar cache and attached to the browser player as WebVTT; image-based formats such as Blu-ray PGS are burned into the HLS video.
 
+Playback opens in a dedicated dark player page that shows preparation progress and the scanned total runtime. The catalog and library use the same dark theme.
+
 The server listens only on loopback by default. If you expose it to a network, put an authenticated TLS reverse proxy in front of it.
 
 ## Development
