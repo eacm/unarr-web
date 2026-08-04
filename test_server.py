@@ -126,6 +126,11 @@ class ValidationTests(unittest.TestCase):
             self.assertIn(f'data-library-filter="{source}"', markup)
         self.assertIn("data-library-action", app)
         self.assertIn("Match with Trakt", app)
+        for sort in ("az", "za", "added", "released"):
+            self.assertIn(f'value="{sort}"', markup)
+        self.assertIn("groupedLibraryTitle", app)
+        self.assertIn("library-poster", app)
+        self.assertIn("openLibraryGroup", app)
 
     def test_trakt_artwork_uses_same_origin_proxy(self):
         server = object.__new__(UnarrServer)

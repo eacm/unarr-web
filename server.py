@@ -228,7 +228,13 @@ class UnarrHandler(SimpleHTTPRequestHandler):
             cache = self.server.reconcile_library()
         except (OSError, json.JSONDecodeError) as error:
             return self.error_json(500, f"Could not read the unarr library: {error}")
-        items = [dict(self.server.public_library_item(item), source="local") for item in cache.get("items", [])]
+        items = []
+        for value in cache.get("items", []):
+            item = dict(self.server.public_library_item(value), source="local", dateAdded=value.get("modTime"))
+            link = self.server.library_links.get(item["id"]) or {}
+            if link:
+                item.update(linked=True, trakt=link, image=link.get("image"), title=link.get("title") or item["title"], released=link.get("released"))
+            items.append(item)
         cloud, favorites = [], []
         if source in {"all", "cloud"}:
             try:
@@ -244,6 +250,13 @@ class UnarrHandler(SimpleHTTPRequestHandler):
         title_query = (((query or {}).get("q") or [""])[0]).strip().casefold()
         if title_query:
             selected = [item for item in selected if title_query in str(item.get("title") or "").casefold()]
+        sort = (((query or {}).get("sort") or ["az"])[0])
+        if sort not in {"az", "za", "added", "released"}:
+            return self.error_json(400, "Invalid library sort.")
+        if sort in {"az", "za"}:
+            selected.sort(key=lambda item: str(item.get("title") or "").casefold(), reverse=sort == "za")
+        else:
+            selected.sort(key=lambda item: str(item.get("dateAdded") if sort == "added" else item.get("released") or item.get("year") or ""), reverse=True)
         total = len(selected)
         selected = selected[:250]
         return self.send_json({
@@ -740,6 +753,7 @@ class UnarrServer(ThreadingHTTPServer):
                     "id": item_id, "source": "cloud", "title": link.get("title") or name, "fileName": name,
                     "fileSize": file.get("size") or 0, "infoHash": info_hash, "torrentId": torrent_id,
                     "fileId": file_id, "linked": bool(link), "trakt": link, "image": link.get("image"),
+                    "released": link.get("released"), "dateAdded": torrent.get("created_at") or torrent.get("updated_at") or torrent.get("download_finished"),
                 })
         return values
 
@@ -752,7 +766,7 @@ class UnarrServer(ThreadingHTTPServer):
         for media_type in ("movies", "shows"):
             for value in self.trakt_request(f"/sync/favorites/{media_type}?limit=1000", authenticated=True):
                 item = self.normalize_trakt_item(value, "favorites")
-                item.update(id=f"favorite:{item['mediaType']}:{item.get('ids', {}).get('trakt')}", source="favorites", favorite=True, fileName="Trakt favorite", fileSize=0)
+                item.update(id=f"favorite:{item['mediaType']}:{item.get('ids', {}).get('trakt')}", source="favorites", favorite=True, fileName="Trakt favorite", fileSize=0, dateAdded=item.get("listedAt"), released=item.get("calendarAt") or item.get("year"))
                 values.append(item)
         self.trakt_favorites_cache = values
         self.trakt_favorites_cache_time = time.monotonic()
@@ -766,7 +780,7 @@ class UnarrServer(ThreadingHTTPServer):
             media_type, trakt_id, title = body.get("type"), body.get("traktId"), body.get("title")
             if media_type not in {"movie", "show"} or isinstance(trakt_id, bool) or not isinstance(trakt_id, int) or trakt_id < 1:
                 raise ValueError("Choose a valid Trakt movie or show.")
-            self.library_links[item_id] = {"type": media_type, "traktId": trakt_id, "title": str(title or "Matched title")[:300], "image": str(body.get("image") or "")[:1000]}
+            self.library_links[item_id] = {"type": media_type, "traktId": trakt_id, "title": str(title or "Matched title")[:300], "image": str(body.get("image") or "")[:1000], "released": str(body.get("released") or "")[:40]}
             self.write_trakt_settings()
             return {"ok": True, "linked": self.library_links[item_id]}
         if action == "unfavorite":
