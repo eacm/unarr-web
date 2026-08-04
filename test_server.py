@@ -1,5 +1,6 @@
 import threading
 import unittest
+from unittest.mock import Mock, patch
 from pathlib import Path
 from types import SimpleNamespace
 from server import BUFFER_PROGRESS, DOWNLOAD_PROGRESS, FILTERS, INFO_HASH, STREAM_URL, TEXT_SUBTITLE_CODECS, UnarrServer
@@ -78,6 +79,30 @@ class ValidationTests(unittest.TestCase):
         proxy = server.register_trakt_image("https://example.test/art.webp")
         self.assertRegex(proxy, r"^/api/trakt/image/[a-f0-9]{32}$")
         self.assertEqual(server.trakt_images[proxy.rsplit("/", 1)[-1]], "https://example.test/art.webp")
+
+    def test_trakt_settings_never_expose_secrets(self):
+        server = object.__new__(UnarrServer)
+        server.trakt_client_id = "client-id"
+        server.trakt_client_secret = "client-secret"
+        server.trakt_access_token = "access-token"
+        server.trakt_user = {"username": "viewer"}
+        settings = server.get_trakt_settings()
+        self.assertTrue(settings["configured"])
+        self.assertTrue(settings["authenticated"])
+        self.assertNotIn("clientSecret", settings)
+        self.assertNotIn("accessToken", settings)
+
+    def test_device_auth_returns_user_code_without_device_code(self):
+        server = object.__new__(UnarrServer)
+        server.trakt_client_id = "client-id"
+        server.trakt_client_secret = "client-secret"
+        server.trakt_lock = threading.Lock()
+        server.trakt_oauth_post = Mock(return_value={"device_code": "private", "user_code": "ABCD1234", "verification_url": "https://trakt.tv/activate", "expires_in": 600, "interval": 5})
+        with patch("server.threading.Thread") as thread:
+            response = server.start_trakt_auth()
+        self.assertEqual(response["userCode"], "ABCD1234")
+        self.assertNotIn("deviceCode", response)
+        thread.return_value.start.assert_called_once()
 
 
 if __name__ == "__main__":

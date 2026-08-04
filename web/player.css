@@ -38,6 +38,20 @@ dialog { box-shadow: 0 30px 90px #000b; }
 .trakt-progress { position: absolute; inset: auto 0 0; height: 4px; background: #ffffff33; }
 .trakt-progress i { display: block; height: 100%; background: var(--lime); }
 .trakt-placeholder { display: grid; place-items: center; min-width: 250px; padding: 20px; color: var(--muted); background: var(--card); }
+.settings-panel { display: grid; grid-template-columns: 1.2fr 1fr; gap: 18px; padding: 70px 0; }
+.settings-card { border: 1px solid var(--line); border-radius: 18px; background: var(--card); padding: clamp(22px,4vw,38px); }
+.settings-card h2 { margin: 5px 0 8px; font: 600 30px Georgia,serif; }
+.settings-card p { color: var(--muted); }
+.settings-card form { display: grid; gap: 14px; margin-top: 28px; }
+.settings-card label { color: var(--muted); font-size: 12px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.settings-card input { display: block; width: 100%; margin-top: 6px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); color: var(--ink); padding: 11px; font: inherit; }
+.settings-card button, .trakt-device a { border: 0; border-radius: 9px; background: var(--lime); color: #111714; padding: 11px 16px; font-weight: 800; text-align: center; text-decoration: none; cursor: pointer; }
+.settings-card button:disabled { opacity: .45; cursor: default; }
+.settings-card button.secondary { border: 1px solid var(--line); background: transparent; color: var(--ink); }
+.settings-help { font-size: 13px; }.settings-help a { color: var(--lime); }
+.settings-actions { display: flex; gap: 8px; margin-top: 28px; }
+.trakt-device { display: grid; gap: 12px; margin-top: 24px; border-top: 1px solid var(--line); padding-top: 24px; text-align: center; color: var(--muted); }
+.trakt-device strong { color: var(--ink); font: 700 38px ui-monospace,SFMono-Regular,monospace; letter-spacing: .14em; }
 
 .release button.stream {
   margin-left: 3px;
@@ -49,6 +63,7 @@ dialog { box-shadow: 0 30px 90px #000b; }
   .release { flex-wrap: wrap; }
   .trakt-setup { align-items: flex-start; flex-direction: column; gap: 3px; }
   .trakt-strip { grid-auto-columns: 82%; }
+  .settings-panel { grid-template-columns: 1fr; padding-top: 35px; }
 }
 
 header nav { display: flex; gap: 4px; }

@@ -26,6 +26,7 @@ DATA_ROOT = Path(os.environ.get("UNARR_DATA_DIR", Path.home() / "Library" / "App
 LIBRARY_CACHE = DATA_ROOT / "library.json"
 HLS_ROOT = Path(os.environ.get("UNARR_WEB_HLS_DIR", ROOT / ".cache" / "hls"))
 TRAKT_IMAGE_ROOT = ROOT / ".cache" / "trakt-images"
+TRAKT_SETTINGS_FILE = DATA_ROOT / "web-trakt.json"
 INFO_HASH = re.compile(r"^(?:[a-fA-F0-9]{40}|[A-Z2-7a-z2-7]{32})$")
 STREAM_URL = re.compile(r"Open this URL in your player:\s*(https?://\S+)")
 BUFFER_PROGRESS = re.compile(r"Buffering:\s*(\d+)%")
@@ -64,6 +65,10 @@ class UnarrHandler(SimpleHTTPRequestHandler):
             return self.library()
         if request.path == "/api/trakt/dashboard":
             return self.trakt_dashboard()
+        if request.path == "/api/trakt/settings":
+            return self.send_json(self.server.get_trakt_settings())
+        if request.path == "/api/trakt/auth":
+            return self.send_json(self.server.get_trakt_auth())
         if request.path.startswith("/api/trakt/image/"):
             return self.trakt_image(request.path[len("/api/trakt/image/"):], head_only=False)
         if request.path.startswith("/api/stream/"):
@@ -82,13 +87,25 @@ class UnarrHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in {"/api/download", "/api/stream", "/api/library/stream"}:
+        if path not in {"/api/download", "/api/stream", "/api/library/stream", "/api/trakt/settings", "/api/trakt/auth"}:
             return self.error_json(404, "Not found.")
         if not self.same_origin():
             return self.error_json(403, "Cross-origin requests are not allowed.")
         body = self.read_json()
         if body is None:
             return self.error_json(400, "A valid JSON request is required.")
+        if path == "/api/trakt/settings":
+            try:
+                return self.send_json(self.server.save_trakt_settings(body))
+            except ValueError as error:
+                return self.error_json(400, str(error))
+            except OSError as error:
+                return self.error_json(500, f"Could not save Trakt settings: {error}")
+        if path == "/api/trakt/auth":
+            try:
+                return self.send_json(self.server.start_trakt_auth(), 202)
+            except (RuntimeError, urllib.error.URLError) as error:
+                return self.error_json(502, str(error))
         if path == "/api/library/stream":
             return self.start_library_stream(body)
         info_hash = body.get("infoHash", "")
@@ -185,6 +202,14 @@ class UnarrHandler(SimpleHTTPRequestHandler):
 
     def do_DELETE(self):
         path = urlparse(self.path).path
+        if path == "/api/trakt/auth":
+            if not self.same_origin():
+                return self.error_json(403, "Cross-origin requests are not allowed.")
+            try:
+                self.server.disconnect_trakt()
+            except OSError as error:
+                return self.error_json(500, f"Could not disconnect Trakt: {error}")
+            return self.send_json({"authenticated": False})
         if not path.startswith("/api/stream/"):
             return self.error_json(404, "Not found.")
         if not self.same_origin():
@@ -303,13 +328,158 @@ class UnarrServer(ThreadingHTTPServer):
         self.ffprobe = shutil.which("ffprobe")
         HLS_ROOT.mkdir(parents=True, exist_ok=True)
         TRAKT_IMAGE_ROOT.mkdir(parents=True, exist_ok=True)
-        self.trakt_client_id = os.environ.get("TRAKT_CLIENT_ID", "")
-        self.trakt_access_token = os.environ.get("TRAKT_ACCESS_TOKEN", "")
+        saved_trakt = self.load_trakt_settings()
+        self.trakt_client_id = os.environ.get("TRAKT_CLIENT_ID", saved_trakt.get("client_id", ""))
+        self.trakt_client_secret = os.environ.get("TRAKT_CLIENT_SECRET", saved_trakt.get("client_secret", ""))
+        self.trakt_access_token = os.environ.get("TRAKT_ACCESS_TOKEN", saved_trakt.get("access_token", ""))
+        self.trakt_refresh_token = saved_trakt.get("refresh_token", "")
+        self.trakt_user = saved_trakt.get("user")
+        self.trakt_auth = {"status": "idle"}
+        self.trakt_auth_id = None
         self.trakt_cache = None
         self.trakt_cache_time = 0
         self.trakt_lock = threading.Lock()
         self.trakt_images = {}
         super().__init__(address, handler)
+
+    @staticmethod
+    def load_trakt_settings():
+        try:
+            value = json.loads(TRAKT_SETTINGS_FILE.read_text())
+            return value if isinstance(value, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def write_trakt_settings(self):
+        TRAKT_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "client_id": self.trakt_client_id, "client_secret": self.trakt_client_secret,
+            "access_token": self.trakt_access_token, "refresh_token": self.trakt_refresh_token,
+            "user": self.trakt_user,
+        }
+        temporary = TRAKT_SETTINGS_FILE.with_suffix(".tmp")
+        temporary.write_text(json.dumps(payload, indent=2))
+        temporary.chmod(0o600)
+        temporary.replace(TRAKT_SETTINGS_FILE)
+
+    def get_trakt_settings(self):
+        return {
+            "configured": bool(self.trakt_client_id and self.trakt_client_secret),
+            "clientId": self.trakt_client_id,
+            "hasClientSecret": bool(self.trakt_client_secret),
+            "authenticated": bool(self.trakt_access_token),
+            "user": self.trakt_user,
+        }
+
+    def save_trakt_settings(self, body):
+        client_id = body.get("clientId", "").strip() if isinstance(body.get("clientId", ""), str) else ""
+        client_secret = body.get("clientSecret", "").strip() if isinstance(body.get("clientSecret", ""), str) else ""
+        if not 8 <= len(client_id) <= 200:
+            raise ValueError("Enter a valid Trakt client ID.")
+        if not client_secret and not self.trakt_client_secret:
+            raise ValueError("Enter the Trakt client secret.")
+        if len(client_secret) > 300:
+            raise ValueError("The Trakt client secret is too long.")
+        with self.trakt_lock:
+            changed = client_id != self.trakt_client_id
+            self.trakt_client_id = client_id
+            if client_secret:
+                self.trakt_client_secret = client_secret
+            if changed:
+                self.trakt_access_token = ""
+                self.trakt_refresh_token = ""
+                self.trakt_user = None
+                self.trakt_auth_id = None
+                self.trakt_auth = {"status": "idle"}
+            self.trakt_cache = None
+        self.write_trakt_settings()
+        return self.get_trakt_settings()
+
+    def trakt_oauth_post(self, path, payload):
+        request = urllib.request.Request(
+            f"https://api.trakt.tv{path}", data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json", "User-Agent": "unarr-web/0.1"}, method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:
+            return json.load(response)
+
+    def start_trakt_auth(self):
+        if not self.trakt_client_id or not self.trakt_client_secret:
+            raise RuntimeError("Save a Trakt client ID and client secret first.")
+        device = self.trakt_oauth_post("/oauth/device/code", {"client_id": self.trakt_client_id})
+        state = {
+            "status": "pending", "userCode": device["user_code"],
+            "verificationUrl": device.get("verification_url", "https://trakt.tv/activate"),
+            "expiresAt": int(time.time()) + int(device.get("expires_in", 600)),
+        }
+        auth_id = secrets.token_urlsafe(12)
+        with self.trakt_lock:
+            self.trakt_auth = state
+            self.trakt_auth_id = auth_id
+        threading.Thread(
+            target=self.poll_trakt_auth,
+            args=(auth_id, device["device_code"], max(5, int(device.get("interval", 5))), state["expiresAt"]),
+            name="trakt-device-auth", daemon=True,
+        ).start()
+        return dict(state)
+
+    def poll_trakt_auth(self, auth_id, device_code, interval, expires_at):
+        while time.time() < expires_at:
+            time.sleep(interval)
+            with self.trakt_lock:
+                if auth_id != self.trakt_auth_id:
+                    return
+            try:
+                token = self.trakt_oauth_post("/oauth/device/token", {
+                    "code": device_code, "client_id": self.trakt_client_id,
+                    "client_secret": self.trakt_client_secret,
+                })
+            except urllib.error.HTTPError as error:
+                if error.code == 400:
+                    continue
+                if error.code == 429:
+                    interval += 5
+                    continue
+                message = {404: "The device code is invalid.", 409: "This code was already used.", 410: "The code expired.", 418: "Authorization was denied."}.get(error.code, f"Trakt returned HTTP {error.code}.")
+                with self.trakt_lock:
+                    self.trakt_auth = {"status": "error", "error": message}
+                return
+            except (OSError, urllib.error.URLError) as error:
+                with self.trakt_lock:
+                    self.trakt_auth = {"status": "error", "error": str(error)}
+                return
+            with self.trakt_lock:
+                if auth_id != self.trakt_auth_id:
+                    return
+                self.trakt_access_token = token.get("access_token", "")
+                self.trakt_refresh_token = token.get("refresh_token", "")
+                self.trakt_cache = None
+            try:
+                settings = self.trakt_request("/users/settings", authenticated=True)
+                user = settings.get("user") or {}
+                self.trakt_user = {"username": user.get("username"), "name": user.get("name")}
+            except Exception:
+                self.trakt_user = None
+            self.write_trakt_settings()
+            with self.trakt_lock:
+                self.trakt_auth = {"status": "complete", "user": self.trakt_user}
+            return
+        with self.trakt_lock:
+            self.trakt_auth = {"status": "error", "error": "The authorization code expired."}
+
+    def get_trakt_auth(self):
+        with self.trakt_lock:
+            return dict(self.trakt_auth)
+
+    def disconnect_trakt(self):
+        with self.trakt_lock:
+            self.trakt_access_token = ""
+            self.trakt_refresh_token = ""
+            self.trakt_user = None
+            self.trakt_auth = {"status": "idle"}
+            self.trakt_auth_id = None
+            self.trakt_cache = None
+        self.write_trakt_settings()
 
     def trakt_request(self, path, authenticated=False):
         if not self.trakt_client_id:
@@ -348,7 +518,7 @@ class UnarrServer(ThreadingHTTPServer):
         ]
         if not self.trakt_client_id:
             rows = [{"id": key, "title": title, "items": [], "locked": True} for key, title, _, _ in sections]
-            return {"configured": False, "authenticated": False, "sections": rows, "message": "Set TRAKT_CLIENT_ID and TRAKT_ACCESS_TOKEN to connect Trakt."}
+            return {"configured": False, "authenticated": False, "sections": rows, "message": "Open Settings to configure and connect Trakt."}
 
         def load(section):
             key, title, path, auth = section
