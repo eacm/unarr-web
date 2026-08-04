@@ -21,6 +21,29 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("movie", FILTERS["type"][1])
         self.assertNotIn("anything", FILTERS["type"][1])
 
+    def test_library_auto_clean_filters_and_keeps_best_episode(self):
+        common = {"source": "cloud", "trakt": {"type": "show", "traktId": 42}}
+        items = [
+            {**common, "id": "low", "fileName": "Show.S01E02.720p.mkv", "fileSize": 800_000_000},
+            {**common, "id": "best", "fileName": "Show.S01E02.2160p.mkv", "fileSize": 4_000_000_000},
+            {**common, "id": "tiny", "fileName": "Show.S01E03.sample.mkv", "fileSize": 3_000_000},
+            {**common, "id": "text", "fileName": "notes.txt", "fileSize": 30_000_000},
+            {**common, "id": "short", "fileName": "Show.S01E04.mkv", "fileSize": 30_000_000, "mediaInfo": {"video": {"duration": 120}}},
+        ]
+        kept, hidden = UnarrServer.clean_library_items(items)
+        self.assertEqual([item["id"] for item in kept], ["best"])
+        self.assertEqual(hidden, {"nonVideo": 1, "tooSmall": 1, "tooShort": 1, "duplicates": 1, "total": 4})
+
+    def test_library_auto_clean_keeps_distinct_show_episodes(self):
+        link = {"type": "show", "traktId": 42}
+        items = [
+            {"source": "cloud", "id": "one", "fileName": "Show.S01E01.mkv", "fileSize": 500_000_000, "trakt": link},
+            {"source": "cloud", "id": "two", "fileName": "Show.S01E02.mkv", "fileSize": 500_000_000, "trakt": link},
+        ]
+        kept, hidden = UnarrServer.clean_library_items(items)
+        self.assertEqual(len(kept), 2)
+        self.assertEqual(hidden["duplicates"], 0)
+
     def test_favicon_exists(self):
         self.assertTrue((Path(__file__).parent / "web" / "favicon.svg").is_file())
 

@@ -37,6 +37,8 @@ BUFFER_PROGRESS = re.compile(r"Buffering:\s*(\d+)%")
 DOWNLOAD_PROGRESS = re.compile(r"(\d+)%\s*\|\s*([^|]+)\|\s*Peers:\s*(\d+)\s*\|\s*Seeds:\s*(\d+)")
 METADATA_TIMEOUT_SECONDS = 60
 VIDEO_EXTENSIONS = {".mp4", ".m4v", ".mkv", ".avi", ".mov", ".webm", ".ts", ".m2ts", ".mpg", ".mpeg", ".wmv"}
+MIN_LIBRARY_VIDEO_BYTES = 20 * 1024 * 1024
+MIN_LIBRARY_VIDEO_SECONDS = 5 * 60
 TEXT_SUBTITLE_CODECS = {"subrip", "srt", "ass", "ssa", "webvtt", "mov_text"}
 FILTERS = {
     "type": ("--type", {"movie", "show"}),
@@ -275,6 +277,7 @@ class UnarrHandler(SimpleHTTPRequestHandler):
             except (RuntimeError, PermissionError, urllib.error.URLError):
                 favorites = []
         selected = {"local": items, "cloud": cloud, "favorites": favorites}.get(source, items + cloud + favorites)
+        selected, cleanup = self.server.clean_library_items(selected)
         title_query = (((query or {}).get("q") or [""])[0]).strip().casefold()
         if title_query:
             selected = [item for item in selected if title_query in " ".join(str(item.get(key) or "") for key in ("title", "folderTitle", "fileName")).casefold()]
@@ -296,7 +299,7 @@ class UnarrHandler(SimpleHTTPRequestHandler):
         return self.send_json({
             "items": selected, "total": total, "source": source, "counts": {"local": len(items), "cloud": len(cloud), "favorites": len(favorites)}, "scannedAt": cache.get("scannedAt"), "refreshedAt": cache.get("refreshedAt"),
             "transcode": {"available": bool(self.server.ffmpeg and self.server.ffprobe), "ffmpeg": self.server.ffmpeg},
-            "scan": self.server.get_scan_state(),
+            "scan": self.server.get_scan_state(), "cleanup": cleanup,
         })
 
     def trakt_dashboard(self):
@@ -897,9 +900,76 @@ class UnarrServer(ThreadingHTTPServer):
                     "fileSize": file.get("size") or 0, "infoHash": info_hash, "torrentId": torrent_id,
                     "fileId": file_id, "linked": bool(link), "trakt": link, "image": link.get("image"),
                     "released": link.get("released"), "dateAdded": torrent.get("created_at") or torrent.get("updated_at") or torrent.get("download_finished"),
+                    "season": (self.library_episode({"fileName": name}) or (None, None))[0],
+                    "episode": (self.library_episode({"fileName": name}) or (None, None))[1],
                     "folderTitle": Path(full_name).parent.name if Path(full_name).parent.name not in {"", "."} else str(torrent.get("name") or ""),
                 })
         return values
+
+    @staticmethod
+    def library_episode(item):
+        if item.get("season") is not None and item.get("episode") is not None:
+            return int(item["season"]), int(item["episode"])
+        name = str(item.get("fileName") or "")
+        match = re.search(r"(?i)(?:\bS(\d{1,3})[ ._-]*E(\d{1,4})\b|\b(\d{1,3})x(\d{1,4})\b)", name)
+        return (int(match.group(1) or match.group(3)), int(match.group(2) or match.group(4))) if match else None
+
+    @staticmethod
+    def library_quality_score(item):
+        text = " ".join(str(item.get(key) or "") for key in ("quality", "fileName", "folderTitle", "codec")).lower()
+        resolution = next((value for token, value in (("4320", 5), ("2160", 4), ("1080", 3), ("720", 2), ("480", 1)) if token in text), 0)
+        source = 3 if re.search(r"(?:remux|blu[ ._-]?ray)", text) else 2 if re.search(r"web[ ._-]?(?:dl|rip)", text) else 1
+        codec = 2 if re.search(r"(?:hevc|h[ ._-]?265|x265|av1)", text) else 1 if re.search(r"(?:h[ ._-]?264|x264)", text) else 0
+        hdr = 1 if re.search(r"(?:dolby[ ._-]?vision|\bdv\b|hdr10|\bhdr\b)", text) else 0
+        return resolution, source, hdr, codec, int(item.get("fileSize") or 0)
+
+    @classmethod
+    def library_duplicate_key(cls, item):
+        if item.get("source") == "favorites":
+            return None
+        link = item.get("trakt") or {}
+        media_type, trakt_id = link.get("type"), link.get("traktId")
+        episode = cls.library_episode(item)
+        if media_type == "show" and trakt_id and episode:
+            return "show", str(trakt_id), episode[0], episode[1]
+        if media_type == "movie" and trakt_id and not re.search(r"(?i)\b(?:cd|disc|part)[ ._-]*\d+\b", str(item.get("fileName") or "")):
+            return "movie", str(trakt_id)
+        if episode:
+            value = str(item.get("folderTitle") or item.get("fileName") or "")
+            title = re.split(r"(?i)\b(?:S\d{1,3}[ ._-]*E\d{1,4}|\d{1,3}x\d{1,4}|season[ ._-]*\d+)\b", value, maxsplit=1)[0]
+            title = re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
+            return ("episode", title, episode[0], episode[1]) if title else None
+        return None
+
+    @classmethod
+    def clean_library_items(cls, items):
+        kept, positions, hidden = [], {}, {"nonVideo": 0, "tooSmall": 0, "tooShort": 0, "duplicates": 0}
+        for item in items:
+            if item.get("source") != "favorites":
+                extension = Path(str(item.get("fileName") or "")).suffix.lower()
+                if extension not in VIDEO_EXTENSIONS:
+                    hidden["nonVideo"] += 1
+                    continue
+                size = int(item.get("fileSize") or 0)
+                if 0 < size < MIN_LIBRARY_VIDEO_BYTES:
+                    hidden["tooSmall"] += 1
+                    continue
+                duration = float((((item.get("mediaInfo") or {}).get("video") or {}).get("duration") or item.get("durationSeconds") or 0))
+                if 0 < duration < MIN_LIBRARY_VIDEO_SECONDS:
+                    hidden["tooShort"] += 1
+                    continue
+            key = cls.library_duplicate_key(item)
+            if key is None or key not in positions:
+                if key is not None:
+                    positions[key] = len(kept)
+                kept.append(item)
+                continue
+            hidden["duplicates"] += 1
+            index = positions[key]
+            if cls.library_quality_score(item) > cls.library_quality_score(kept[index]):
+                kept[index] = item
+        hidden["total"] = sum(hidden.values())
+        return kept, hidden
 
     def get_trakt_favorites(self):
         if not self.trakt_access_token:
