@@ -88,6 +88,9 @@ header nav { display: flex; gap: 4px; }
 .library-card .media-summary { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; }
 .library-card .media-summary span { border: 1px solid var(--line); border-radius: 99px; padding: 3px 7px; color: var(--muted); font-size: 11px; }
 .library-card .play-library { width: 100%; margin-top: 15px; border: 0; border-radius: 9px; padding: 10px; background: var(--ink); color: white; font-weight: 800; cursor: pointer; }
+.track-pickers { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; }
+.track-pickers label { color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+.track-pickers select { display: block; width: 100%; min-width: 0; margin-top: 4px; border: 1px solid var(--line); border-radius: 8px; padding: 7px; background: var(--paper); color: var(--ink); text-transform: none; letter-spacing: normal; }
 
 @media (max-width: 600px) {
   header { padding-inline: 16px; }

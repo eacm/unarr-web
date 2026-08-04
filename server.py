@@ -28,6 +28,7 @@ BUFFER_PROGRESS = re.compile(r"Buffering:\s*(\d+)%")
 DOWNLOAD_PROGRESS = re.compile(r"(\d+)%\s*\|\s*([^|]+)\|\s*Peers:\s*(\d+)\s*\|\s*Seeds:\s*(\d+)")
 METADATA_TIMEOUT_SECONDS = 60
 VIDEO_EXTENSIONS = {".mp4", ".m4v", ".mkv", ".avi", ".mov", ".webm", ".ts", ".m2ts", ".mpg", ".mpeg", ".wmv"}
+TEXT_SUBTITLE_CODECS = {"subrip", "srt", "ass", "ssa", "webvtt", "mov_text"}
 FILTERS = {
     "type": ("--type", {"movie", "show"}),
     "quality": ("--quality", {"480p", "720p", "1080p", "2160p"}),
@@ -112,12 +113,18 @@ class UnarrHandler(SimpleHTTPRequestHandler):
     def start_library_stream(self, body):
         item_id = body.get("itemId", "")
         quality = body.get("quality", "original")
+        audio_index = body.get("audioIndex", 0)
+        subtitle_index = body.get("subtitleIndex", -1)
         if not isinstance(item_id, str) or not re.fullmatch(r"[a-f0-9]{64}", item_id):
             return self.error_json(400, "A valid library item ID is required.")
         if quality not in {"original", "1080p", "720p", "480p"}:
             return self.error_json(400, "Invalid playback quality.")
+        if isinstance(audio_index, bool) or not isinstance(audio_index, int) or audio_index < 0 or audio_index > 99:
+            return self.error_json(400, "Invalid audio track.")
+        if isinstance(subtitle_index, bool) or not isinstance(subtitle_index, int) or subtitle_index < -1 or subtitle_index > 99:
+            return self.error_json(400, "Invalid subtitle track.")
         try:
-            session_id = self.server.create_library_stream(item_id, quality)
+            session_id = self.server.create_library_stream(item_id, quality, audio_index, subtitle_index)
         except LookupError as error:
             return self.error_json(404, str(error))
         except RuntimeError as error:
@@ -133,7 +140,7 @@ class UnarrHandler(SimpleHTTPRequestHandler):
         path = (HLS_ROOT / parts[2] / parts[3]).resolve()
         if HLS_ROOT.resolve() not in path.parents or not path.is_file():
             return self.error_json(404, "Media segment not found.")
-        content_types = {".m3u8": "application/vnd.apple.mpegurl", ".m4s": "video/iso.segment", ".mp4": "video/mp4"}
+        content_types = {".m3u8": "application/vnd.apple.mpegurl", ".m4s": "video/iso.segment", ".mp4": "video/mp4", ".vtt": "text/vtt; charset=utf-8"}
         self.send_response(200)
         self.send_header("Content-Type", content_types.get(path.suffix, "application/octet-stream"))
         self.send_header("Content-Length", str(path.stat().st_size))
@@ -320,6 +327,8 @@ class UnarrServer(ThreadingHTTPServer):
             snapshot = self.library_signature(live_items)
             if self.library_snapshot is None:
                 self.library_snapshot = snapshot
+                if any(not item.get("indexed") for item in live_items):
+                    self.schedule_library_scan(roots)
             elif snapshot != self.library_snapshot:
                 self.library_snapshot = snapshot
                 self.schedule_library_scan(roots)
@@ -406,7 +415,7 @@ class UnarrServer(ThreadingHTTPServer):
             "scanError": item.get("scanError"), "indexed": item.get("indexed", True),
         }
 
-    def create_library_stream(self, item_id, quality):
+    def create_library_stream(self, item_id, quality, audio_index=0, subtitle_index=-1):
         if not self.ffmpeg or not self.ffprobe:
             raise RuntimeError("ffmpeg and ffprobe are required for browser HLS playback.")
         item = next((value for value in self.reconcile_library().get("items", []) if self.library_item_id(value) == item_id), None)
@@ -415,36 +424,65 @@ class UnarrServer(ThreadingHTTPServer):
         source = Path(item.get("filePath", ""))
         if not source.is_file():
             raise LookupError("The library file is no longer available. Run 'unarr scan' to refresh the library.")
+        media_info = item.get("mediaInfo") or {}
+        audio_tracks = media_info.get("audio") or []
+        subtitle_tracks = media_info.get("subtitles") or []
+        if audio_tracks and audio_index >= len(audio_tracks):
+            raise LookupError("The selected audio track no longer exists. Refresh the library and try again.")
+        if subtitle_index >= len(subtitle_tracks):
+            raise LookupError("The selected subtitle track no longer exists. Refresh the library and try again.")
+        burn_subtitle = subtitle_index >= 0 and subtitle_tracks[subtitle_index].get("codec", "").lower() not in TEXT_SUBTITLE_CODECS
         with self.stream_lock:
             active = sum(value["status"] in {"buffering", "ready"} and value.get("kind") == "library" and value.get("process") and value["process"].poll() is None for value in self.streams.values())
             if active >= 2:
                 raise RuntimeError("Two library transcodes are already active. Stop one before starting another.")
 
-        media_id = f"lib{item_id[:20]}{quality.replace('p', '')}"
+        media_id = f"lib{item_id[:16]}{quality.replace('p', '')}a{audio_index}s{subtitle_index + 1}"
         output_dir = HLS_ROOT / media_id
         playlist = output_dir / "master.m3u8"
         session_id = secrets.token_urlsafe(18)
-        if playlist.is_file() and "#EXT-X-ENDLIST" in playlist.read_text(errors="ignore"):
+        cache_complete = playlist.is_file() and "#EXT-X-ENDLIST" in playlist.read_text(errors="ignore")
+        if not cache_complete:
+            if output_dir.exists():
+                shutil.rmtree(output_dir)
+            output_dir.mkdir(parents=True)
+        subtitle_url = self.prepare_subtitle(source, subtitle_index, output_dir, media_id) if subtitle_index >= 0 and not burn_subtitle else None
+        selected_audio = audio_tracks[audio_index] if audio_index < len(audio_tracks) else {}
+        selected_subtitle = subtitle_tracks[subtitle_index] if subtitle_index >= 0 else {}
+        tracks = []
+        if subtitle_url:
+            tracks.append({
+                "kind": "subtitles", "src": subtitle_url,
+                "srclang": selected_subtitle.get("lang") or "und",
+                "label": selected_subtitle.get("title") or selected_subtitle.get("lang") or "Subtitles",
+                "default": True,
+            })
+        if cache_complete:
             with self.stream_lock:
                 self.streams[session_id] = {
                     "kind": "library", "status": "ready", "phase": "ready", "message": "Loaded from HLS cache",
                     "progress": 100, "url": f"/media/{media_id}/master.m3u8", "error": None,
-                    "process": None, "started_at": time.monotonic(),
+                    "process": None, "started_at": time.monotonic(), "tracks": tracks,
+                    "audio": selected_audio,
                 }
             return session_id
-        if output_dir.exists():
-            shutil.rmtree(output_dir)
-        output_dir.mkdir(parents=True)
-
         heights = {"1080p": 1080, "720p": 720, "480p": 480}
         # libx264 is the reliable cross-platform fallback. The daemon performs
         # deeper hardware probing; this standalone process must not assume that
         # an encoder listed by ffmpeg can actually create a session on the host.
         video_args = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-maxrate", "5M", "-bufsize", "10M"]
+        filters = []
+        if burn_subtitle:
+            filters.append(f"[0:v:0][0:s:{subtitle_index}]overlay")
         if quality in heights:
-            video_args += ["-vf", f"scale=-2:min({heights[quality]}\\,ih)"]
+            filters.append(f"scale=-2:min({heights[quality]}\\,ih)")
+        if filters:
+            filter_chain = ",".join(filters) + "[hlsvideo]"
+            video_mapping = ["-filter_complex", filter_chain, "-map", "[hlsvideo]"]
+        else:
+            video_mapping = ["-map", "0:v:0"]
         args = [
-            self.ffmpeg, "-hide_banner", "-y", "-i", str(source), "-map", "0:v:0", "-map", "0:a:0?",
+            self.ffmpeg, "-hide_banner", "-y", "-i", str(source), *video_mapping, "-map", f"0:a:{audio_index}?",
             *video_args, "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-f", "hls", "-hls_time", "4",
             "-hls_playlist_type", "event", "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4",
             "-hls_segment_filename", str(output_dir / "seg-%06d.m4s"), str(playlist),
@@ -455,9 +493,28 @@ class UnarrServer(ThreadingHTTPServer):
                 "kind": "library", "status": "buffering", "phase": "transcoding", "message": "Starting HLS transcode…",
                 "progress": 0, "url": None, "error": None, "process": process, "started_at": time.monotonic(),
                 "playlist": playlist, "media_url": f"/media/{media_id}/master.m3u8",
+                "tracks": tracks, "audio": selected_audio,
             }
         threading.Thread(target=self.watch_library_stream, args=(session_id,), name=f"library-hls-{process.pid}", daemon=True).start()
         return session_id
+
+    def prepare_subtitle(self, source, subtitle_index, output_dir, media_id):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        destination = output_dir / f"subtitle-{subtitle_index}.vtt"
+        if destination.is_file():
+            return f"/media/{media_id}/{destination.name}"
+        cached = source.parent / ".unarr" / f"{source.name}.s{subtitle_index}.vtt"
+        if cached.is_file():
+            shutil.copy2(cached, destination)
+            return f"/media/{media_id}/{destination.name}"
+        result = subprocess.run(
+            [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(source),
+             "-map", f"0:s:{subtitle_index}", "-c:s", "webvtt", str(destination)],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        if result.returncode or not destination.is_file():
+            raise RuntimeError((result.stderr or "Could not extract the selected subtitle track.").strip())
+        return f"/media/{media_id}/{destination.name}"
 
     def watch_library_stream(self, session_id):
         with self.stream_lock:
@@ -521,6 +578,8 @@ class UnarrServer(ThreadingHTTPServer):
             if item is None:
                 return None
             response = {key: item[key] for key in ("status", "phase", "message", "progress", "url", "error")}
+            response["tracks"] = item.get("tracks", [])
+            response["audio"] = item.get("audio")
             response["elapsedSeconds"] = round(time.monotonic() - item["started_at"])
             if item.get("kind") != "library":
                 response["metadataTimeoutSeconds"] = METADATA_TIMEOUT_SECONDS

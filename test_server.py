@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from server import BUFFER_PROGRESS, DOWNLOAD_PROGRESS, FILTERS, INFO_HASH, STREAM_URL, UnarrServer
+from server import BUFFER_PROGRESS, DOWNLOAD_PROGRESS, FILTERS, INFO_HASH, STREAM_URL, TEXT_SUBTITLE_CODECS, UnarrServer
 
 
 class ValidationTests(unittest.TestCase):
@@ -45,6 +45,10 @@ class ValidationTests(unittest.TestCase):
         before = [{"filePath": "/media/a.mkv", "fileSize": 10, "modTime": "one"}]
         after = [{"filePath": "/media/a.mkv", "fileSize": 11, "modTime": "two"}]
         self.assertNotEqual(UnarrServer.library_signature(before), UnarrServer.library_signature(after))
+
+    def test_browser_text_subtitle_codecs(self):
+        self.assertTrue({"subrip", "ass", "webvtt"}.issubset(TEXT_SUBTITLE_CODECS))
+        self.assertNotIn("hdmv_pgs_subtitle", TEXT_SUBTITLE_CODECS)
 
 
 if __name__ == "__main__":

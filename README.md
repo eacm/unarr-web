@@ -29,6 +29,8 @@ python3 server.py --unarr /path/to/unarr
 
 Library HLS uses `ffmpeg` and `ffprobe` from `PATH`, transcodes to browser-safe H.264/AAC, and keeps completed encodes under `.cache/hls` for instant replay. Override that location with `UNARR_WEB_HLS_DIR`. Run `unarr scan ~/Media` to refresh the library index.
 
+Scanned audio tracks can be selected before playback. Text subtitle formats are extracted or reused from Unarr's `.unarr` sidecar cache and attached to the browser player as WebVTT; image-based formats such as Blu-ray PGS are burned into the HLS video.
+
 The server listens only on loopback by default. If you expose it to a network, put an authenticated TLS reverse proxy in front of it.
 
 ## Development
