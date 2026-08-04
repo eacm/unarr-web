@@ -104,6 +104,8 @@ class UnarrHandler(SimpleHTTPRequestHandler):
         if path == "/api/trakt/auth":
             try:
                 return self.send_json(self.server.start_trakt_auth(), 202)
+            except urllib.error.HTTPError as error:
+                return self.error_json(502, getattr(error, "trakt_message", str(error)))
             except (RuntimeError, urllib.error.URLError) as error:
                 return self.error_json(502, str(error))
         if path == "/api/library/stream":
@@ -398,10 +400,21 @@ class UnarrServer(ThreadingHTTPServer):
     def trakt_oauth_post(self, path, payload):
         request = urllib.request.Request(
             f"https://api.trakt.tv{path}", data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json", "User-Agent": "unarr-web/0.1"}, method="POST",
+            headers={
+                "Content-Type": "application/json", "User-Agent": "unarr-web/0.1",
+                "trakt-api-key": self.trakt_client_id, "trakt-api-version": "2",
+            }, method="POST",
         )
-        with urllib.request.urlopen(request, timeout=15) as response:
-            return json.load(response)
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as error:
+            try:
+                detail = json.loads(error.read().decode()).get("error")
+            except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+                detail = None
+            error.trakt_message = detail or f"Trakt rejected the OAuth request (HTTP {error.code}). Check the client ID and client secret."
+            raise
 
     def start_trakt_auth(self):
         if not self.trakt_client_id or not self.trakt_client_secret:
@@ -440,7 +453,7 @@ class UnarrServer(ThreadingHTTPServer):
                 if error.code == 429:
                     interval += 5
                     continue
-                message = {404: "The device code is invalid.", 409: "This code was already used.", 410: "The code expired.", 418: "Authorization was denied."}.get(error.code, f"Trakt returned HTTP {error.code}.")
+                message = {404: "The device code is invalid.", 409: "This code was already used.", 410: "The code expired.", 418: "Authorization was denied."}.get(error.code, getattr(error, "trakt_message", f"Trakt returned HTTP {error.code}."))
                 with self.trakt_lock:
                     self.trakt_auth = {"status": "error", "error": message}
                 return
