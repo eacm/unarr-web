@@ -76,3 +76,24 @@
 @media (max-width: 600px) {
   .release { flex-wrap: wrap; }
 }
+
+header nav { display: flex; gap: 4px; }
+.nav-button { border: 0; border-radius: 8px; padding: 8px 12px; background: transparent; color: var(--muted); font-weight: 700; cursor: pointer; }
+.nav-button.active { background: var(--card); color: var(--ink); box-shadow: 0 0 0 1px var(--line); }
+.library-tools { display: flex; gap: 10px; align-items: center; padding: 12px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); }
+.library-tools input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; padding: 8px; font: inherit; }
+.library-tools select { border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: var(--paper); }
+#transcode-state { color: var(--muted); font-size: 12px; }
+.library-card .integrity { color: #a33e31; }
+.library-card .media-summary { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; }
+.library-card .media-summary span { border: 1px solid var(--line); border-radius: 99px; padding: 3px 7px; color: var(--muted); font-size: 11px; }
+.library-card .play-library { width: 100%; margin-top: 15px; border: 0; border-radius: 9px; padding: 10px; background: var(--ink); color: white; font-weight: 800; cursor: pointer; }
+
+@media (max-width: 600px) {
+  header { padding-inline: 16px; }
+  header nav { order: 3; }
+  .brand { font-size: 0; }
+  .brand .mark { margin: 0; font-size: 22px; }
+  .library-tools { flex-wrap: wrap; }
+  #transcode-state { width: 100%; }
+}

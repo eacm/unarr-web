@@ -22,7 +22,10 @@ python3 server.py --unarr /path/to/unarr
 - Search movies and shows with type, quality, and sort filters
 - Queue a selected release for download
 - Stream a selected release in the browser with automatic buffering and cleanup
+- Browse the local scanned library and play it through same-origin HLS
 - View local CLI and daemon status
+
+Library HLS uses `ffmpeg` and `ffprobe` from `PATH`, transcodes to browser-safe H.264/AAC, and keeps completed encodes under `.cache/hls` for instant replay. Override that location with `UNARR_WEB_HLS_DIR`. Run `unarr scan ~/Media` to refresh the library index.
 
 The server listens only on loopback by default. If you expose it to a network, put an authenticated TLS reverse proxy in front of it.
 

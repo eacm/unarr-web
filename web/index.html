@@ -7,12 +7,13 @@
   <title>unarr web</title><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/player.css">
 </head>
 <body>
-  <header><a class="brand" href="/"><span class="mark">u</span>unarr</a><div id="connection" class="pill">Checking local CLI…</div></header>
+  <header><a class="brand" href="/"><span class="mark">u</span>unarr</a><nav><button id="discover-nav" class="nav-button active">Discover</button><button id="library-nav" class="nav-button">Library</button></nav><div id="connection" class="pill">Checking local CLI…</div></header>
   <main>
-    <section class="hero"><p class="eyebrow">YOUR LIBRARY, UNCOMPLICATED</p><h1>Find it. Queue it.<br><em>Keep it local.</em></h1><p class="lede">A calm interface for the unarr already running on your machine.</p></section>
+    <section class="hero"><p id="hero-eyebrow" class="eyebrow">YOUR LIBRARY, UNCOMPLICATED</p><h1 id="hero-title">Find it. Queue it.<br><em>Keep it local.</em></h1><p id="hero-lede" class="lede">A calm interface for the unarr already running on your machine.</p></section>
     <form id="search-form" class="search"><input id="query" name="q" type="search" minlength="2" maxlength="120" placeholder="Search movies and shows…" autofocus required><button>Search</button>
       <div class="filters"><select name="type"><option value="">Movies & shows</option><option value="movie">Movies</option><option value="show">Shows</option></select><select name="quality"><option value="">Any quality</option><option>2160p</option><option>1080p</option><option>720p</option><option>480p</option></select><select name="sort"><option value="relevance">Most relevant</option><option value="seeders">Most seeders</option><option value="rating">Highest rated</option><option value="year">Newest</option></select></div>
     </form>
+    <div id="library-tools" class="library-tools" hidden><input id="library-filter" type="search" placeholder="Filter your library…"><select id="library-quality"><option value="original">Original quality</option><option value="1080p">1080p</option><option value="720p">720p</option><option value="480p">480p</option></select><span id="transcode-state"></span></div>
     <div class="bar"><h2 id="results-title">Ready to discover</h2><button id="status-button" class="text-button">System status</button></div>
     <section id="results" class="results"><div class="empty"><span>⌕</span><p>Search the catalog to begin.</p></div></section>
   </main>

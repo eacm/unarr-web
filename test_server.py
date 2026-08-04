@@ -1,6 +1,6 @@
 import unittest
 from pathlib import Path
-from server import BUFFER_PROGRESS, DOWNLOAD_PROGRESS, FILTERS, INFO_HASH, STREAM_URL
+from server import BUFFER_PROGRESS, DOWNLOAD_PROGRESS, FILTERS, INFO_HASH, STREAM_URL, UnarrServer
 
 
 class ValidationTests(unittest.TestCase):
@@ -27,6 +27,12 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(BUFFER_PROGRESS.search("Buffering: 42% (4 MB / 10 MB)").group(1), "42")
         progress = DOWNLOAD_PROGRESS.search("18% | 2.4 MB/s | Peers: 7 | Seeds: 3")
         self.assertEqual(progress.groups(), ("18", "2.4 MB/s ", "7", "3"))
+
+    def test_public_library_item_hides_path(self):
+        item = {"fingerprint": "a" * 64, "filePath": "/private/movie.mkv", "fileName": "movie.mkv", "title": "Movie"}
+        public = UnarrServer.public_library_item(item)
+        self.assertEqual(public["id"], "a" * 64)
+        self.assertNotIn("filePath", public)
 
 
 if __name__ == "__main__":
