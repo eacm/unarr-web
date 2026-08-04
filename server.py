@@ -844,8 +844,9 @@ class UnarrServer(ThreadingHTTPServer):
             escaped = source_url.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
             video_mapping = ["-vf", f"subtitles='{escaped}':si={subtitle_index}", "-map", "0:v:0"]
         args = [
-            self.ffmpeg, "-hide_banner", "-y", "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_on_network_error", "1", "-reconnect_on_http_error", "4xx,5xx", "-reconnect_delay_max", "5",
-            "-i", source_url, *video_mapping, "-map", f"0:a:{audio_index}?",
+            self.ffmpeg, "-hide_banner", "-y", "-rw_timeout", "15000000", "-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_at_eof", "1",
+            "-reconnect_on_network_error", "1", "-reconnect_on_http_error", "4xx,5xx", "-reconnect_delay_max", "3",
+            "-i", source_url, *(["-t", str(duration)] if duration else []), *video_mapping, "-map", f"0:a:{audio_index}?",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-maxrate", "5M", "-bufsize", "10M",
             "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-f", "hls", "-hls_time", "4",
             "-hls_playlist_type", "event", "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4",
