@@ -21,6 +21,7 @@ python3 server.py --unarr /path/to/unarr
 - Verify and display the locally installed unarr version
 - Search movies and shows with type, quality, and sort filters
 - Queue a selected release for download
+- Stream a selected release in the browser with automatic buffering and cleanup
 - View local CLI and daemon status
 
 The server listens only on loopback by default. If you expose it to a network, put an authenticated TLS reverse proxy in front of it.

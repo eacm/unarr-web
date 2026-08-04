@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import secrets
 import subprocess
 import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -16,6 +17,7 @@ from urllib.parse import parse_qs, urlparse
 ROOT = Path(__file__).parent
 WEB_ROOT = ROOT / "web"
 INFO_HASH = re.compile(r"^(?:[a-fA-F0-9]{40}|[A-Z2-7a-z2-7]{32})$")
+STREAM_URL = re.compile(r"Open this URL in your player:\s*(https?://\S+)")
 FILTERS = {
     "type": ("--type", {"movie", "show"}),
     "quality": ("--quality", {"480p", "720p", "1080p", "2160p"}),
@@ -30,7 +32,7 @@ class UnarrHandler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(WEB_ROOT), **kwargs)
 
     def end_headers(self):
-        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' https: data:; connect-src 'self'")
+        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' https: data:; connect-src 'self'; media-src http: https:")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         super().end_headers()
@@ -43,10 +45,13 @@ class UnarrHandler(SimpleHTTPRequestHandler):
             return self.command_json(["status", "--no-color"], transform=lambda text: {"output": text.strip()})
         if request.path == "/api/search":
             return self.search(parse_qs(request.query))
+        if request.path.startswith("/api/stream/"):
+            return self.stream_status(request.path[len("/api/stream/"):])
         return super().do_GET()
 
     def do_POST(self):
-        if urlparse(self.path).path != "/api/download":
+        path = urlparse(self.path).path
+        if path not in {"/api/download", "/api/stream"}:
             return self.error_json(404, "Not found.")
         if not self.same_origin():
             return self.error_json(403, "Cross-origin requests are not allowed.")
@@ -60,7 +65,19 @@ class UnarrHandler(SimpleHTTPRequestHandler):
             return self.error_json(400, "A valid JSON request is required.")
         if not isinstance(info_hash, str) or not INFO_HASH.fullmatch(info_hash):
             return self.error_json(400, "A valid torrent info hash is required.")
+        if path == "/api/stream":
+            return self.start_stream(info_hash)
         return self.start_download(info_hash)
+
+    def do_DELETE(self):
+        path = urlparse(self.path).path
+        if not path.startswith("/api/stream/"):
+            return self.error_json(404, "Not found.")
+        if not self.same_origin():
+            return self.error_json(403, "Cross-origin requests are not allowed.")
+        if self.server.stop_stream(path[len("/api/stream/"):]):
+            return self.send_json({"status": "stopped"})
+        return self.error_json(404, "Stream session not found.")
 
     def start_download(self, info_hash):
         """Start a long-running download without tying it to the HTTP request."""
@@ -85,6 +102,23 @@ class UnarrHandler(SimpleHTTPRequestHandler):
             daemon=True,
         ).start()
         return self.send_json({"output": "Download started.", "pid": process.pid}, 202)
+
+    def start_stream(self, info_hash):
+        try:
+            session_id = self.server.create_stream(info_hash)
+        except RuntimeError as error:
+            return self.error_json(429, str(error))
+        except FileNotFoundError:
+            return self.error_json(503, f"unarr executable not found: {self.server.unarr_bin}")
+        except OSError as error:
+            return self.error_json(502, f"Could not start unarr: {error}")
+        return self.send_json({"id": session_id, "status": "buffering"}, 202)
+
+    def stream_status(self, session_id):
+        session = self.server.get_stream(session_id)
+        if session is None:
+            return self.error_json(404, "Stream session not found.")
+        return self.send_json(session)
 
     def search(self, params):
         query = params.get("q", [""])[0].strip()
@@ -143,7 +177,69 @@ class UnarrServer(ThreadingHTTPServer):
     def __init__(self, address, handler, unarr_bin, command_timeout=20):
         self.unarr_bin = unarr_bin
         self.command_timeout = command_timeout
+        self.streams = {}
+        self.stream_lock = threading.Lock()
         super().__init__(address, handler)
+
+    def create_stream(self, info_hash):
+        with self.stream_lock:
+            active = sum(item["status"] in {"buffering", "ready"} for item in self.streams.values())
+            if active >= 3:
+                raise RuntimeError("Three streams are already active. Stop one before starting another.")
+        process = subprocess.Popen(
+            [self.unarr_bin, "stream", info_hash, "--no-open", "--no-color"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, start_new_session=True, bufsize=1,
+        )
+        session_id = secrets.token_urlsafe(18)
+        with self.stream_lock:
+            self.streams[session_id] = {"status": "buffering", "url": None, "error": None, "process": process}
+        threading.Thread(target=self.watch_stream, args=(session_id,), name=f"unarr-stream-{process.pid}", daemon=True).start()
+        return session_id
+
+    def get_stream(self, session_id):
+        with self.stream_lock:
+            item = self.streams.get(session_id)
+            if item is None:
+                return None
+            return {key: item[key] for key in ("status", "url", "error")}
+
+    def stop_stream(self, session_id):
+        with self.stream_lock:
+            item = self.streams.get(session_id)
+            if item is None:
+                return False
+            process = item["process"]
+            item["status"] = "stopped"
+        if process.poll() is None:
+            process.terminate()
+        return True
+
+    def watch_stream(self, session_id):
+        with self.stream_lock:
+            item = self.streams[session_id]
+            process = item["process"]
+        recent = []
+        for line in process.stdout:
+            clean = line.strip()
+            if clean:
+                recent = (recent + [clean])[-8:]
+            match = STREAM_URL.search(line)
+            if match:
+                with self.stream_lock:
+                    item["url"] = match.group(1)
+                    item["status"] = "ready"
+                print(f"[stream {session_id[:8]}] ready: {match.group(1)}")
+        returncode = process.wait()
+        with self.stream_lock:
+            if item["status"] == "stopped":
+                return
+            if returncode:
+                item["status"] = "error"
+                item["error"] = recent[-1] if recent else f"unarr exited with code {returncode}"
+                print(f"[stream {session_id[:8]}] failed ({returncode}): {item['error']}")
+            else:
+                item["status"] = "stopped"
 
     @staticmethod
     def watch_download(process, info_hash):
