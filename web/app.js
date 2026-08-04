@@ -39,7 +39,7 @@ fetch('/api/health').then(async response => {
 }).catch(error => { $('#connection').textContent='CLI unavailable'; $('#connection').title=error.message; });
 
 $('#search-form').addEventListener('submit', async event => {
-  event.preventDefault(); const params=new URLSearchParams(new FormData(event.currentTarget));
+  event.preventDefault(); const params=new URLSearchParams(new FormData(event.currentTarget));$('#results-bar').hidden=false;
   $('#results-title').textContent=`Searching for “${params.get('q')}”…`; results.innerHTML='<div class="empty"><p>Searching your catalog…</p></div>';
   try { const response=await fetch(`/api/search?${params}`); const data=await response.json(); if(!response.ok) throw new Error(data.error); render(data.results || []); }
   catch(error){ results.innerHTML=`<div class="empty"><p>${escapeHTML(error.message)}</p></div>`; $('#results-title').textContent='Search unavailable'; }
@@ -53,10 +53,10 @@ async function setView(view){
   currentView=view;clearTimeout(libraryTimer);
   const library=view==='library',settings=view==='settings',discover=view==='discover';
   $('#discover-nav').classList.toggle('active',discover);$('#library-nav').classList.toggle('active',library);$('#settings-nav').classList.toggle('active',settings);
-  $('#search-form').hidden=!discover;$('#trakt-dashboard').hidden=!discover;$('#library-tools').hidden=!library;$('#settings-panel').hidden=!settings;$('.bar').hidden=settings;results.hidden=settings;
-  if(discover){$('#results-title').textContent='Ready to discover';results.innerHTML='<div class="empty"><span>⌕</span><p>Search the catalog to begin.</p></div>';return}
-  if(settings){await loadTraktSettings();return}
-  librarySignature='';$('#results-title').textContent='Loading library…';results.innerHTML='<div class="empty"><p>Reading the local library…</p></div>';await refreshLibrary();
+  $('#search-form').hidden=!discover;$('#trakt-dashboard').hidden=!discover;$('#library-tools').hidden=!library;$('#settings-panel').hidden=!settings;results.hidden=settings;
+  if(discover){$('#results-bar').hidden=true;results.innerHTML='';return}
+  if(settings){$('#results-bar').hidden=true;await loadTraktSettings();return}
+  $('#results-bar').hidden=false;librarySignature='';$('#results-title').textContent='Loading library…';results.innerHTML='<div class="empty"><p>Reading the local library…</p></div>';await refreshLibrary();
 }
 
 async function loadTraktSettings(){
@@ -88,7 +88,7 @@ results.addEventListener('click',async event=>{const button=event.target.closest
 results.addEventListener('click',async event=>{const button=event.target.closest('[data-stream]');if(!button)return;button.disabled=true;alert('Unarr will find peers and build a playback buffer. The web player will open now and show live progress.');await launchPlayer('/api/stream',{infoHash:button.dataset.stream},button.dataset.title,button);});
 results.addEventListener('click',async event=>{const button=event.target.closest('[data-library]');if(!button)return;button.disabled=true;const card=button.closest('.library-card');const audioIndex=Number(card.querySelector('.library-audio')?.value||0);const subtitleIndex=Number(card.querySelector('.library-subtitle')?.value??-1);alert('Unarr will prepare browser-compatible HLS using your selected audio, subtitles, and quality. The web player will open now.');await launchPlayer('/api/library/stream',{itemId:button.dataset.library,quality:$('#library-quality').value,audioIndex,subtitleIndex},button.dataset.title,button);});
 async function launchPlayer(endpoint,body,title,button){try{const response=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await response.json();if(!response.ok)throw new Error(data.error);location.href=`/watch.html?session=${encodeURIComponent(data.id)}&title=${encodeURIComponent(title)}`;}catch(error){button.disabled=false;alert(`Playback could not start:\n\n${error.message}`);}}
-$('#status-button').addEventListener('click',async()=>{const dialog=$('#status-dialog');dialog.showModal();$('#status-output').textContent='Loading…';try{const response=await fetch('/api/status');const data=await response.json();if(!response.ok)throw new Error(data.error);$('#status-output').textContent=data.output}catch(error){$('#status-output').textContent=error.message}}); $('#close-dialog').addEventListener('click',()=>$('#status-dialog').close());
+$('#connection').addEventListener('click',async()=>{const dialog=$('#status-dialog');dialog.showModal();$('#status-output').textContent='Loading…';try{const response=await fetch('/api/status');const data=await response.json();if(!response.ok)throw new Error(data.error);$('#status-output').textContent=data.output}catch(error){$('#status-output').textContent=error.message}}); $('#close-dialog').addEventListener('click',()=>$('#status-dialog').close());
 function escapeHTML(value){return String(value??'').replace(/[&<>'"]/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]))}
 function formatBytes(value){const units=['B','KB','MB','GB','TB'];let size=Number(value)||0,index=0;while(size>=1000&&index<units.length-1){size/=1000;index++}return `${size.toFixed(index?1:0)} ${units[index]}`}
 function trackLabel(track,index,prefix){const imageSubtitles=['hdmv_pgs_subtitle','dvd_subtitle','dvb_subtitle'];const parts=[track.lang&&track.lang.toUpperCase(),track.title,track.codec,imageSubtitles.includes(track.codec)&&'burn-in',track.channels&&`${track.channels}ch`].filter(Boolean);return parts.join(' · ')||`${prefix} ${index+1}`}

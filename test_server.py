@@ -29,6 +29,14 @@ class ValidationTests(unittest.TestCase):
         for name in ("watch.html", "watch.js", "watch.css"):
             self.assertTrue((web / name).is_file())
 
+    def test_discover_starts_with_search_and_version_opens_status(self):
+        web = Path(__file__).parent / "web"
+        markup = (web / "index.html").read_text()
+        self.assertLess(markup.index('id="search-form"'), markup.index('id="trakt-dashboard"'))
+        self.assertIn('id="connection" class="pill connection-button"', markup)
+        self.assertNotIn("Ready to discover", markup)
+        self.assertNotIn("Search the catalog to begin", markup)
+
     def test_stream_ready_url(self):
         line = "Buffering: 100%  Open this URL in your player: http://192.168.1.4:9000/stream?t=secret"
         self.assertEqual(STREAM_URL.search(line).group(1), "http://192.168.1.4:9000/stream?t=secret")
