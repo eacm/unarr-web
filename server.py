@@ -1126,10 +1126,14 @@ class UnarrServer(ThreadingHTTPServer):
         with self.trakt_lock:
             if self.trakt_cache and time.monotonic() - self.trakt_cache_time < 300:
                 return self.trakt_cache
+        calendar_start = datetime.date.today().isoformat()
         sections = [
             ("continue", "Continue watching", "/sync/playback/movies?limit=50", True),
             ("start", "Start watching", "/sync/watchlist/shows?limit=50", True),
-            ("calendar", "Calendar", f"/calendars/my/shows/{datetime.date.today().isoformat()}/14?limit=50", True),
+            ("calendar", "Calendar", (
+                f"/calendars/my/shows/{calendar_start}/14?limit=50",
+                f"/calendars/my/movies/{calendar_start}/14?limit=50",
+            ), True),
             ("watchlist", "Watchlist", "/sync/watchlist/movies?limit=50", True),
             ("history", "History", "/sync/history/movies?limit=50", True),
             ("collection", "Collection", "/sync/collection/movies?limit=50", True),
@@ -1149,7 +1153,13 @@ class UnarrServer(ThreadingHTTPServer):
             if auth and not self.trakt_access_token:
                 return {"id": key, "title": title, "items": [], "locked": True}
             try:
-                values = self.trakt_request(path, authenticated=auth)
+                if isinstance(path, tuple):
+                    values = []
+                    for calendar_path in path:
+                        values.extend(self.trakt_request(calendar_path, authenticated=auth))
+                    values.sort(key=lambda value: value.get("first_aired") or value.get("released") or "")
+                else:
+                    values = self.trakt_request(path, authenticated=auth)
                 return {"id": key, "title": title, "items": [self.normalize_trakt_item(value, key) for value in values[:50]]}
             except Exception as error:
                 return {"id": key, "title": title, "items": [], "error": str(error), "locked": auth}

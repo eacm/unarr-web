@@ -82,6 +82,27 @@ class ValidationTests(unittest.TestCase):
         )
         self.assertTrue(all(section["locked"] for section in dashboard["sections"]))
 
+    def test_trakt_calendar_combines_movies_and_shows_by_date(self):
+        server = object.__new__(UnarrServer)
+        server.trakt_client_id = "client"
+        server.trakt_access_token = "token"
+        server.trakt_cache = None
+        server.trakt_cache_time = 0
+        server.trakt_lock = threading.Lock()
+        server.trakt_images = {}
+
+        def request(path, authenticated=False):
+            if "/calendars/my/shows/" in path:
+                return [{"first_aired": "2026-08-06T01:00:00.000Z", "show": {"title": "A Show", "ids": {"trakt": 2}}, "episode": {"season": 1, "number": 3}}]
+            if "/calendars/my/movies/" in path:
+                return [{"released": "2026-08-05", "movie": {"title": "A Movie", "ids": {"trakt": 1}}}]
+            return []
+
+        server.trakt_request = request
+        calendar = next(section for section in server.get_trakt_dashboard()["sections"] if section["id"] == "calendar")
+        self.assertEqual([item["title"] for item in calendar["items"]], ["A Movie", "A Show"])
+        self.assertEqual([item["mediaType"] for item in calendar["items"]], ["movie", "show"])
+
     def test_trakt_artwork_uses_same_origin_proxy(self):
         server = object.__new__(UnarrServer)
         server.trakt_lock = threading.Lock()
