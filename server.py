@@ -10,6 +10,7 @@ import re
 import secrets
 import subprocess
 import threading
+import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -18,6 +19,9 @@ ROOT = Path(__file__).parent
 WEB_ROOT = ROOT / "web"
 INFO_HASH = re.compile(r"^(?:[a-fA-F0-9]{40}|[A-Z2-7a-z2-7]{32})$")
 STREAM_URL = re.compile(r"Open this URL in your player:\s*(https?://\S+)")
+BUFFER_PROGRESS = re.compile(r"Buffering:\s*(\d+)%")
+DOWNLOAD_PROGRESS = re.compile(r"(\d+)%\s*\|\s*([^|]+)\|\s*Peers:\s*(\d+)\s*\|\s*Seeds:\s*(\d+)")
+METADATA_TIMEOUT_SECONDS = 60
 FILTERS = {
     "type": ("--type", {"movie", "show"}),
     "quality": ("--quality", {"480p", "720p", "1080p", "2160p"}),
@@ -193,7 +197,11 @@ class UnarrServer(ThreadingHTTPServer):
         )
         session_id = secrets.token_urlsafe(18)
         with self.stream_lock:
-            self.streams[session_id] = {"status": "buffering", "url": None, "error": None, "process": process}
+            self.streams[session_id] = {
+                "status": "buffering", "phase": "metadata", "message": "Waiting for torrent metadata…",
+                "progress": None, "url": None, "error": None, "process": process,
+                "started_at": time.monotonic(),
+            }
         threading.Thread(target=self.watch_stream, args=(session_id,), name=f"unarr-stream-{process.pid}", daemon=True).start()
         return session_id
 
@@ -202,7 +210,10 @@ class UnarrServer(ThreadingHTTPServer):
             item = self.streams.get(session_id)
             if item is None:
                 return None
-            return {key: item[key] for key in ("status", "url", "error")}
+            response = {key: item[key] for key in ("status", "phase", "message", "progress", "url", "error")}
+            response["elapsedSeconds"] = round(time.monotonic() - item["started_at"])
+            response["metadataTimeoutSeconds"] = METADATA_TIMEOUT_SECONDS
+            return response
 
     def stop_stream(self, session_id):
         with self.stream_lock:
@@ -219,17 +230,18 @@ class UnarrServer(ThreadingHTTPServer):
         with self.stream_lock:
             item = self.streams[session_id]
             process = item["process"]
-        recent = []
-        for line in process.stdout:
-            clean = line.strip()
-            if clean:
-                recent = (recent + [clean])[-8:]
-            match = STREAM_URL.search(line)
-            if match:
-                with self.stream_lock:
-                    item["url"] = match.group(1)
-                    item["status"] = "ready"
-                print(f"[stream {session_id[:8]}] ready: {match.group(1)}")
+        recent, record = [], ""
+        for character in iter(lambda: process.stdout.read(1), ""):
+            if character not in "\r\n":
+                record += character
+                continue
+            if record.strip():
+                recent = (recent + [record.strip()])[-8:]
+                self.update_stream_progress(item, record, session_id)
+            record = ""
+        if record.strip():
+            recent = (recent + [record.strip()])[-8:]
+            self.update_stream_progress(item, record, session_id)
         returncode = process.wait()
         with self.stream_lock:
             if item["status"] == "stopped":
@@ -240,6 +252,32 @@ class UnarrServer(ThreadingHTTPServer):
                 print(f"[stream {session_id[:8]}] failed ({returncode}): {item['error']}")
             else:
                 item["status"] = "stopped"
+
+    def update_stream_progress(self, item, output, session_id):
+        url_match = STREAM_URL.search(output)
+        buffer_match = BUFFER_PROGRESS.search(output)
+        download_match = DOWNLOAD_PROGRESS.search(output)
+        with self.stream_lock:
+            if "Waiting for metadata" in output:
+                item["phase"] = "metadata"
+                item["message"] = "Waiting for torrent metadata…"
+            if buffer_match:
+                percent = min(100, int(buffer_match.group(1)))
+                item["phase"] = "buffering"
+                item["progress"] = percent
+                item["message"] = f"Building playback buffer… {percent}%"
+            if download_match:
+                percent, speed, peers, seeds = download_match.groups()
+                item["phase"] = "streaming"
+                item["progress"] = min(100, int(percent))
+                item["message"] = f"{speed.strip()} · {peers} peers · {seeds} seeds"
+            if url_match:
+                item["url"] = url_match.group(1)
+                item["status"] = "ready"
+                item["phase"] = "ready"
+                item["message"] = "Ready to play"
+        if url_match:
+            print(f"[stream {session_id[:8]}] ready: {url_match.group(1)}")
 
     @staticmethod
     def watch_download(process, info_hash):

@@ -31,6 +31,48 @@
   color: #b9c2bd;
 }
 
+.stream-progress,
+.stream-error {
+  width: min(440px, calc(100% - 48px));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+}
+
+.stream-progress span,
+.stream-progress small,
+.stream-error span,
+.stream-error small { color: #9eaaa4; }
+
+.spinner {
+  width: 34px;
+  height: 34px;
+  border: 3px solid #334039;
+  border-top-color: var(--lime);
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+}
+
+.progress-track {
+  width: 100%;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: #28322d;
+}
+
+.progress-track i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--lime);
+  transition: width .35s ease;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
 @media (max-width: 600px) {
   .release { flex-wrap: wrap; }
 }

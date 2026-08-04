@@ -1,6 +1,6 @@
 import unittest
 from pathlib import Path
-from server import FILTERS, INFO_HASH, STREAM_URL
+from server import BUFFER_PROGRESS, DOWNLOAD_PROGRESS, FILTERS, INFO_HASH, STREAM_URL
 
 
 class ValidationTests(unittest.TestCase):
@@ -22,6 +22,11 @@ class ValidationTests(unittest.TestCase):
     def test_stream_ready_url(self):
         line = "Buffering: 100%  Open this URL in your player: http://192.168.1.4:9000/stream?t=secret"
         self.assertEqual(STREAM_URL.search(line).group(1), "http://192.168.1.4:9000/stream?t=secret")
+
+    def test_stream_progress_patterns(self):
+        self.assertEqual(BUFFER_PROGRESS.search("Buffering: 42% (4 MB / 10 MB)").group(1), "42")
+        progress = DOWNLOAD_PROGRESS.search("18% | 2.4 MB/s | Peers: 7 | Seeds: 3")
+        self.assertEqual(progress.groups(), ("18", "2.4 MB/s ", "7", "3"))
 
 
 if __name__ == "__main__":
