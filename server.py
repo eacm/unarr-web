@@ -902,7 +902,9 @@ class UnarrServer(ThreadingHTTPServer):
             "-hls_playlist_type", "event", "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4",
             "-hls_segment_filename", str(output_dir / "seg-%06d.m4s"), str(playlist),
         ]
-        process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        # ffmpeg continuously writes progress to stderr. Leaving it attached to an
+        # unread pipe eventually fills the OS pipe buffer and freezes the encoder.
+        process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True, start_new_session=True)
         with self.stream_lock:
             self.streams[session_id] = {
                 "kind": "torbox", "status": "buffering", "phase": "transcoding", "message": "Preparing TorBox HLS…",
@@ -1487,7 +1489,9 @@ class UnarrServer(ThreadingHTTPServer):
             "-hls_playlist_type", "event", "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4",
             "-hls_segment_filename", str(output_dir / "seg-%06d.m4s"), str(playlist),
         ]
-        process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        # Do not pipe ffmpeg's progress output unless it is drained concurrently;
+        # a full stderr pipe stalls HLS generation even though ffmpeg stays alive.
+        process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True, start_new_session=True)
         with self.stream_lock:
             self.streams[session_id] = {
                 "kind": "library", "status": "buffering", "phase": "transcoding", "message": "Starting HLS transcode…",
