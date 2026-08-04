@@ -1,4 +1,6 @@
+import json
 import threading
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 from pathlib import Path
@@ -103,6 +105,18 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(response["userCode"], "ABCD1234")
         self.assertNotIn("deviceCode", response)
         thread.return_value.start.assert_called_once()
+
+    def test_trakt_settings_are_written_owner_only(self):
+        server = object.__new__(UnarrServer)
+        server.trakt_client_id = "client-id"
+        server.trakt_client_secret = "client-secret"
+        server.trakt_access_token = ""
+        server.trakt_refresh_token = ""
+        server.trakt_user = None
+        with tempfile.TemporaryDirectory() as directory, patch("server.TRAKT_SETTINGS_FILE", Path(directory) / "trakt.json") as settings_file:
+            server.write_trakt_settings()
+            self.assertEqual(settings_file.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(json.loads(settings_file.read_text())["client_id"], "client-id")
 
 
 if __name__ == "__main__":
