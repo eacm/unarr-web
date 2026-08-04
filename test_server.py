@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from server import FILTERS, INFO_HASH
 
 
@@ -14,6 +15,9 @@ class ValidationTests(unittest.TestCase):
     def test_filter_allowlists(self):
         self.assertIn("movie", FILTERS["type"][1])
         self.assertNotIn("anything", FILTERS["type"][1])
+
+    def test_favicon_exists(self):
+        self.assertTrue((Path(__file__).parent / "web" / "favicon.svg").is_file())
 
 
 if __name__ == "__main__":

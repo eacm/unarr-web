@@ -8,6 +8,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -59,7 +60,31 @@ class UnarrHandler(SimpleHTTPRequestHandler):
             return self.error_json(400, "A valid JSON request is required.")
         if not isinstance(info_hash, str) or not INFO_HASH.fullmatch(info_hash):
             return self.error_json(400, "A valid torrent info hash is required.")
-        return self.command_json(["download", info_hash, "--no-color"], status=202, transform=lambda text: {"output": text.strip()})
+        return self.start_download(info_hash)
+
+    def start_download(self, info_hash):
+        """Start a long-running download without tying it to the HTTP request."""
+        try:
+            process = subprocess.Popen(
+                [self.server.unarr_bin, "download", info_hash, "--no-color"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                start_new_session=True,
+            )
+        except FileNotFoundError:
+            return self.error_json(503, f"unarr executable not found: {self.server.unarr_bin}")
+        except OSError as error:
+            return self.error_json(502, f"Could not start unarr: {error}")
+
+        threading.Thread(
+            target=self.server.watch_download,
+            args=(process, info_hash),
+            name=f"unarr-download-{process.pid}",
+            daemon=True,
+        ).start()
+        return self.send_json({"output": "Download started.", "pid": process.pid}, 202)
 
     def search(self, params):
         query = params.get("q", [""])[0].strip()
@@ -119,6 +144,16 @@ class UnarrServer(ThreadingHTTPServer):
         self.unarr_bin = unarr_bin
         self.command_timeout = command_timeout
         super().__init__(address, handler)
+
+    @staticmethod
+    def watch_download(process, info_hash):
+        output, _ = process.communicate()
+        short_hash = info_hash[:8]
+        if process.returncode:
+            message = output.strip() or "no command output"
+            print(f"[download {short_hash}] failed ({process.returncode}): {message}")
+        else:
+            print(f"[download {short_hash}] completed")
 
 
 def parse_args():
