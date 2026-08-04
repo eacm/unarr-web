@@ -9,7 +9,7 @@
 <body>
   <header><a class="brand" href="/"><span class="mark">u</span>unarr</a><nav><button id="discover-nav" class="nav-button active">Discover</button><button id="library-nav" class="nav-button">Library</button><button id="settings-nav" class="nav-button">Settings</button></nav><button id="connection" class="pill connection-button" type="button">Checking local CLI…</button></header>
   <main>
-    <form id="search-form" class="search" autocomplete="off"><input id="query" name="q" type="search" minlength="2" maxlength="120" placeholder="Search movies and shows…" autofocus required><button>Search</button>
+    <form id="search-form" class="search" autocomplete="off"><input id="query" name="q" type="search" minlength="2" maxlength="120" placeholder="Search movies and shows…" autofocus required><select id="trakt-search-sort" aria-label="Sort search matches"><option value="recommended">Recommended</option><option value="popular">Most popular</option></select><button>Search</button>
       <div id="trakt-search-results" class="search-matches" hidden></div>
     </form>
     <section id="trakt-dashboard" class="trakt-dashboard" aria-label="Trakt dashboard"><div class="trakt-loading">Loading Trakt…</div></section>

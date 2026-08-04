@@ -178,6 +178,17 @@ class ValidationTests(unittest.TestCase):
         styles = (Path(__file__).parent / "web" / "player.css").read_text()
         self.assertRegex(styles, r"\.search \{[^}]*z-index: 12")
 
+    def test_trakt_search_sorting(self):
+        server = object.__new__(UnarrServer)
+        server.trakt_request = Mock(return_value=[
+            {"score": 10, "movie": {"title": "Relevant", "votes": 2, "ids": {"trakt": 1}}},
+            {"score": 2, "movie": {"title": "Popular", "votes": 500, "ids": {"trakt": 2}}},
+        ])
+        server.trakt_lock = threading.Lock()
+        server.trakt_images = {}
+        self.assertEqual(server.search_trakt("test", "recommended")[0]["title"], "Relevant")
+        self.assertEqual(server.search_trakt("test", "popular")[0]["title"], "Popular")
+
 
 if __name__ == "__main__":
     unittest.main()

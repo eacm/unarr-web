@@ -178,10 +178,13 @@ class UnarrHandler(SimpleHTTPRequestHandler):
 
     def trakt_search(self, params):
         query = params.get("q", [""])[0].strip()
+        sort = params.get("sort", ["recommended"])[0]
         if not 2 <= len(query) <= 120:
             return self.error_json(400, "Search must be between 2 and 120 characters.")
+        if sort not in {"recommended", "popular"}:
+            return self.error_json(400, "Invalid Trakt search sort.")
         try:
-            return self.send_json({"results": self.server.search_trakt(query)})
+            return self.send_json({"results": self.server.search_trakt(query, sort), "limit": 20, "sort": sort})
         except (RuntimeError, PermissionError, urllib.error.URLError) as error:
             return self.error_json(502, f"Could not search Trakt: {error}")
 
@@ -668,6 +671,7 @@ class UnarrServer(ThreadingHTTPServer):
             "rating": rating, "listedAt": value.get("listed_at"), "watchedAt": value.get("watched_at"),
             "calendarAt": value.get("first_aired") or value.get("released"),
             "plays": value.get("plays"), "section": section, "mediaType": media_type,
+            "score": value.get("score"), "votes": media.get("votes"),
         }
 
     def get_trakt_details(self, media_type, trakt_id, season=None):
@@ -701,10 +705,12 @@ class UnarrServer(ThreadingHTTPServer):
             ]
         return result
 
-    def search_trakt(self, query):
-        encoded = urllib.parse.urlencode({"query": query, "limit": 10})
+    def search_trakt(self, query, sort="recommended"):
+        encoded = urllib.parse.urlencode({"query": query, "limit": 20})
         values = self.trakt_request(f"/search/movie,show?{encoded}")
-        return [self.normalize_trakt_item(value, "search") for value in values[:10]]
+        results = [self.normalize_trakt_item(value, "search") for value in values[:20]]
+        key = (lambda item: item.get("votes") or 0) if sort == "popular" else (lambda item: item.get("score") or 0)
+        return sorted(results, key=key, reverse=True)
 
     def public_trakt_metadata(self, media, media_type):
         return {
