@@ -160,11 +160,62 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("reflectLibraryMatch", app)
         self.assertIn("libraryVisibleLimit", app)
         self.assertIn("libraryAutoMatchTried", app)
-        self.assertIn("limit=${encodeURIComponent(libraryVisibleLimit)}", app)
+        self.assertNotIn("limit=${encodeURIComponent(libraryVisibleLimit)}", app)
+        self.assertNotIn("matching items", app)
+        self.assertIn("$('#results-title').textContent='Library'", app)
+        self.assertIn("['download-options','Download to local',favorite.id]", app)
         self.assertIn("folderTitle", (Path(__file__).parent / "server.py").read_text())
         self.assertIn("isGenericExtra", app)
         self.assertIn("reviewLibraryGroupWithAI", app)
         self.assertIn('id="export-matches"', markup)
+
+    def test_dashboard_rail_controls_and_continue_removal_exist(self):
+        app = (Path(__file__).parent / "web" / "app.js").read_text()
+        markup = (Path(__file__).parent / "web" / "index.html").read_text()
+        for control in ("rail-date-sort", "rail-watched-toggle", "calendar-from", "calendar-to"):
+            self.assertIn(control, app)
+        self.assertIn("/api/trakt/playback/remove", app)
+        self.assertIn("contextmenu", app)
+        self.assertIn('id="poster-continue-action"', markup)
+
+    def test_continue_items_expose_playback_id(self):
+        server = object.__new__(UnarrServer)
+        server.trakt_image_cache = {}
+        server.trakt_image_lock = threading.Lock()
+        item = server.normalize_trakt_item(
+            {"id": 77, "movie": {"title": "Example", "year": 2024, "ids": {"trakt": 10}}},
+            "continue",
+        )
+        self.assertEqual(item["playbackId"], 77)
+
+    def test_remove_trakt_playback_rejects_invalid_id(self):
+        server = object.__new__(UnarrServer)
+        server.trakt_access_token = "token"
+        with self.assertRaises(ValueError):
+            server.remove_trakt_playback({"playbackId": "invalid"})
+
+    def test_library_duplicate_list_contains_only_lower_quality_copy(self):
+        lower = {"id": "cloud:1:1", "source": "cloud", "fileName": "Example.1080p.WEB-DL.mkv", "fileSize": 1_000_000_000, "trakt": {"type": "movie", "traktId": 12}}
+        higher = {"id": "cloud:2:2", "source": "cloud", "fileName": "Example.2160p.Remux.mkv", "fileSize": 4_000_000_000, "trakt": {"type": "movie", "traktId": 12}}
+        duplicates = UnarrServer.library_duplicates([lower, higher])
+        self.assertEqual([item["id"] for item in duplicates], [lower["id"]])
+        self.assertTrue(duplicates[0]["duplicate"])
+
+    def test_popular_bare_titles_are_movies_with_options(self):
+        server = object.__new__(UnarrServer)
+        server.trakt_image_cache = {}
+        server.trakt_image_lock = threading.Lock()
+        item = server.normalize_trakt_item({"title": "Popular Movie", "ids": {"trakt": 44}}, "popular")
+        self.assertEqual(item["mediaType"], "movie")
+        self.assertEqual(item["ids"]["trakt"], 44)
+
+    def test_new_library_and_rail_preferences_are_present(self):
+        app = (Path(__file__).parent / "web" / "app.js").read_text()
+        markup = (Path(__file__).parent / "web" / "index.html").read_text()
+        for identifier in ('id="library-media"', 'id="library-from"', 'id="library-to"', 'id="poster-watched-action"'):
+            self.assertIn(identifier, markup)
+        for behavior in ("unarrRailPreferences", "/api/trakt/calendar", "/api/trakt/history", "unarrActivitySeen"):
+            self.assertIn(behavior, app)
 
     def test_ai_settings_never_expose_api_key(self):
         server = object.__new__(UnarrServer)
