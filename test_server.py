@@ -214,8 +214,43 @@ class ValidationTests(unittest.TestCase):
         markup = (Path(__file__).parent / "web" / "index.html").read_text()
         for identifier in ('id="library-media"', 'id="library-from"', 'id="library-to"', 'id="poster-watched-action"'):
             self.assertIn(identifier, markup)
-        for behavior in ("unarrRailPreferences", "/api/trakt/calendar", "/api/trakt/history", "unarrActivitySeen"):
+        for behavior in ("unarrRailPreferences", "/api/trakt/calendar", "/api/trakt/history", "/api/trakt/continue", "rail-visibility-toggle", "unarrActivitySeen"):
             self.assertIn(behavior, app)
+
+    def test_torbox_control_uses_json_not_multipart(self):
+        server = object.__new__(UnarrServer)
+        server.torbox_api_key = "token"
+        completed = SimpleNamespace(returncode=0, stdout='{"success":true,"data":{}}', stderr="")
+        with patch("server.subprocess.run", return_value=completed) as run:
+            server.torbox_request("controltorrent", json_body={"torrent_id": 123, "operation": "delete"})
+        command = run.call_args.args[0]
+        self.assertIn("--data", command)
+        self.assertIn('{"torrent_id":123,"operation":"delete"}', command)
+        self.assertNotIn("-F", command)
+
+    def test_torbox_database_error_is_success_when_package_is_gone(self):
+        server = object.__new__(UnarrServer)
+        item = {"id": "cloud:65737841:320", "source": "cloud", "torrentId": 65737841, "title": "Example"}
+        server.get_cloud_library = Mock(return_value=[item])
+        server.torbox_request = Mock(side_effect=RuntimeError("DATABASE_ERROR"))
+        server.refresh_torbox_index = Mock(return_value=[])
+        server.torbox_index = [item]
+        server.torbox_index_time = 1
+        server.library_links = {}
+        server.database = Mock()
+        self.assertTrue(server.library_action({"action": "delete", "itemId": item["id"]})["ok"])
+        server.refresh_torbox_index.assert_called_once_with(force=True)
+
+    def test_artwork_repair_includes_empty_matched_images(self):
+        server = object.__new__(UnarrServer)
+        server.library_links = {"cloud:1:2": {"type": "movie", "traktId": 5, "title": "Example", "image": ""}}
+        server.provider_sync_stop = threading.Event()
+        server.trakt_images = {}
+        server.database = Mock()
+        server.get_trakt_details = Mock(return_value={"poster": "/api/trakt/image/repaired"})
+        server.repair_library_artwork()
+        self.assertEqual(server.library_links["cloud:1:2"]["image"], "/api/trakt/image/repaired")
+        server.database.save_matches.assert_called_once()
 
     def test_ai_settings_never_expose_api_key(self):
         server = object.__new__(UnarrServer)

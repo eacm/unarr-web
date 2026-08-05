@@ -58,6 +58,9 @@ class UnarrHandler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(WEB_ROOT), **kwargs)
 
     def end_headers(self):
+        request_path = urlparse(self.path).path
+        if not request_path.startswith("/api/") and (request_path == "/" or Path(request_path).suffix in {".html", ".js", ".css"}):
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
         self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' https: data:; connect-src 'self'; media-src http: https:")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
@@ -65,6 +68,11 @@ class UnarrHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         request = urlparse(self.path)
+        if request.path in {"/favicon.ico", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"}:
+            self.send_response(302)
+            self.send_header("Location", "/favicon.svg")
+            self.end_headers()
+            return
         if request.path == "/api/health":
             return self.command_json(["version"], transform=lambda text: {"ok": True, "version": text.strip()})
         if request.path == "/api/status":
@@ -80,6 +88,11 @@ class UnarrHandler(SimpleHTTPRequestHandler):
                 return self.send_json({"items": self.server.get_trakt_calendar(parse_qs(request.query))})
             except (ValueError, RuntimeError, PermissionError, urllib.error.URLError) as error:
                 return self.error_json(400 if isinstance(error, ValueError) else 502, str(error))
+        if request.path == "/api/trakt/continue":
+            try:
+                return self.send_json({"id": "continue", "title": "Continue watching", "items": self.server.get_trakt_continue()})
+            except (RuntimeError, PermissionError, urllib.error.URLError) as error:
+                return self.error_json(502, str(error))
         if request.path == "/api/trakt/settings":
             return self.send_json(self.server.get_trakt_settings())
         if request.path == "/api/torrentclaw/settings":
@@ -189,7 +202,7 @@ class UnarrHandler(SimpleHTTPRequestHandler):
             try:
                 torrent_id = body.get("torrentId")
                 file_id = body.get("fileId")
-                file_name = body.get("fileName", "")
+                file_name = body.get("fileName") or body.get("title", "")
                 result = self.server.start_torbox(info_hash, play=path.endswith("/play"), torrent_id=torrent_id, file_id=file_id, file_name=file_name)
                 return self.send_json(result, 200 if result.get("url") else 202)
             except (RuntimeError, LookupError, PermissionError) as error:
@@ -297,7 +310,7 @@ class UnarrHandler(SimpleHTTPRequestHandler):
                 item.update(linked=True, trakt=link, image=link.get("image"), title=link.get("title") or item["title"], released=link.get("released"))
             items.append(item)
         cloud, favorites = [], []
-        if source in {"all", "cloud"}:
+        if source in {"all", "cloud", "favorites"}:
             cloud = self.server.database.get_library_items("cloud")
             if not cloud:
                 try:
@@ -311,6 +324,10 @@ class UnarrHandler(SimpleHTTPRequestHandler):
                     favorites = self.server.get_trakt_favorites()
                 except (RuntimeError, PermissionError, urllib.error.URLError):
                     favorites = []
+        if favorites:
+            local_ids = {(str((item.get("trakt") or {}).get("type")), str((item.get("trakt") or {}).get("traktId"))) for item in items if (item.get("trakt") or {}).get("traktId")}
+            cloud_ids = {(str((item.get("trakt") or {}).get("type")), str((item.get("trakt") or {}).get("traktId"))) for item in cloud if (item.get("trakt") or {}).get("traktId")}
+            favorites = [dict(item, availableLocal=(str(item.get("mediaType")), str((item.get("ids") or {}).get("trakt"))) in local_ids, availableCloud=(str(item.get("mediaType")), str((item.get("ids") or {}).get("trakt"))) in cloud_ids) for item in favorites]
         selected = {"local": items, "cloud": cloud, "favorites": favorites}.get(source, items + cloud + favorites)
         media_filter = (((query or {}).get("media") or ["all"])[0])
         if media_filter not in {"all", "movie", "show", "unmatched", "duplicate"}:
@@ -332,7 +349,10 @@ class UnarrHandler(SimpleHTTPRequestHandler):
                         datetime.date.fromisoformat(value)
                     except ValueError:
                         return self.error_json(400, "Invalid library date range.")
-            selected = [item for item in selected if (not date_from or str(item.get("dateAdded") or "")[:10] >= date_from) and (not date_to or str(item.get("dateAdded") or "")[:10] <= date_to)]
+            def release_date(item):
+                value = str(item.get("released") or item.get("year") or "")
+                return f"{value}-01-01" if re.fullmatch(r"\d{4}", value) else value[:10]
+            selected = [item for item in selected if (not date_from or release_date(item) >= date_from) and (not date_to or release_date(item) <= date_to)]
         title_query = (((query or {}).get("q") or [""])[0]).strip().casefold()
         if title_query:
             selected = [item for item in selected if title_query in " ".join(str(item.get(key) or "") for key in ("title", "folderTitle", "fileName")).casefold()]
@@ -669,12 +689,13 @@ class UnarrServer(ThreadingHTTPServer):
                 return
             image = str(link.get("image") or "")
             image_id = image.rsplit("/", 1)[-1] if image.startswith("/api/trakt/image/") else ""
-            if not image_id or (TRAKT_IMAGE_ROOT / f"{image_id}.webp").is_file() or image_id in self.trakt_images:
+            if image_id and ((TRAKT_IMAGE_ROOT / f"{image_id}.webp").is_file() or image_id in self.trakt_images):
                 continue
             key = (link.get("type"), link.get("traktId"))
             if key not in repaired:
                 try:
-                    repaired[key] = self.get_trakt_details(str(key[0]), str(key[1])).get("poster") or ""
+                    metadata = self.get_trakt_details(str(key[0]), str(key[1]))
+                    repaired[key] = metadata.get("poster") or metadata.get("fanart") or ""
                 except Exception as error:
                     print(f"[artwork] Could not repair {key[0]} {key[1]}: {error}")
                     repaired[key] = ""
@@ -989,12 +1010,14 @@ class UnarrServer(ThreadingHTTPServer):
         """Compatibility helper for callers that still request one release."""
         return self.find_torrentclaw_releases(body)["releases"][0]
 
-    def torbox_request(self, path, *, form=None):
+    def torbox_request(self, path, *, form=None, json_body=None):
         if not self.torbox_api_key:
             raise RuntimeError("Add a TorBox API key in Settings first.")
         command = ["curl", "-sS", "--max-time", "45", "-H", f"Authorization: Bearer {self.torbox_api_key}", "-H", "Accept: application/json", "-H", "User-Agent: unarr-web/0.1"]
         for key, value in (form or {}).items():
             command.extend(["-F", f"{key}={value}"])
+        if json_body is not None:
+            command.extend(["-H", "Content-Type: application/json", "--data", json.dumps(json_body, separators=(",", ":"))])
         command.append(f"https://api.torbox.app/v1/api/torrents/{path}")
         try:
             result = subprocess.run(command, capture_output=True, text=True, timeout=50, check=False)
@@ -1019,10 +1042,10 @@ class UnarrServer(ThreadingHTTPServer):
             return {str(key).lower() for key, value in data.items() if value}
         return {str(item.get("hash", "")).lower() for item in (data or []) if isinstance(item, dict)}
 
-    def refresh_torbox_index(self):
-        if self.torbox_index and time.time() - self.torbox_index_time < 60:
+    def refresh_torbox_index(self, force=False):
+        if not force and self.torbox_index and time.time() - self.torbox_index_time < 60:
             return self.torbox_index
-        if not self.torbox_index:
+        if not force and not self.torbox_index:
             cached, synced_at = self.database.get_provider_cache("torbox")
             if isinstance(cached, list):
                 self.torbox_index, self.torbox_index_time = cached, synced_at
@@ -1211,7 +1234,14 @@ class UnarrServer(ThreadingHTTPServer):
                     raise ValueError("Cloud item has no valid torrent hash.")
                 return {"ok": True, "infoHash": item["infoHash"]}
             if action == "delete":
-                self.torbox_request("controltorrent", form={"torrent_id": item["torrentId"], "operation": "delete"})
+                try:
+                    self.torbox_request("controltorrent", json_body={"torrent_id": item["torrentId"], "operation": "delete"})
+                except RuntimeError as error:
+                    if "DATABASE_ERROR" not in str(error):
+                        raise
+                    remaining = self.refresh_torbox_index(force=True)
+                    if any(str(value.get("id") or value.get("torrent_id")) == str(item["torrentId"]) for value in remaining):
+                        raise
                 self.torbox_index = []
                 self.torbox_index_time = 0
                 prefix = f"cloud:{item['torrentId']}:"
@@ -1781,6 +1811,12 @@ class UnarrServer(ThreadingHTTPServer):
             values.extend(self.trakt_request(f"/calendars/my/{kind}/{start}/{days}?limit=1000", authenticated=True))
         values.sort(key=lambda value: value.get("first_aired") or value.get("released") or "")
         return [self.normalize_trakt_item(value, "calendar") for value in values]
+
+    def get_trakt_continue(self):
+        if not self.trakt_access_token:
+            raise PermissionError("Connect Trakt to load Continue Watching.")
+        values = self.trakt_request("/sync/playback/movies?limit=50", authenticated=True)
+        return [self.normalize_trakt_item(value, "continue") for value in values[:50]]
 
     def get_trakt_dashboard(self):
         with self.trakt_lock:
