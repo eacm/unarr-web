@@ -13,6 +13,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import urllib.error
@@ -21,6 +22,8 @@ import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+
+from database import AppDatabase
 
 ROOT = Path(__file__).parent
 WEB_ROOT = ROOT / "web"
@@ -31,6 +34,7 @@ TRAKT_IMAGE_ROOT = ROOT / ".cache" / "trakt-images"
 TORBOX_MEDIA_ROOT = ROOT / ".cache" / "torbox-media"
 LEGACY_TRAKT_SETTINGS_FILE = ROOT / ".cache" / "trakt-settings.json"
 TRAKT_SETTINGS_FILE = Path(os.environ.get("UNARR_WEB_TRAKT_SETTINGS", ROOT / ".data" / "user-settings.json"))
+DATABASE_FILE = Path(os.environ.get("UNARR_WEB_DATABASE", ROOT / ".data" / "unarr-web.sqlite3"))
 INFO_HASH = re.compile(r"^(?:[a-fA-F0-9]{40}|[A-Z2-7a-z2-7]{32})$")
 STREAM_URL = re.compile(r"Open this URL in your player:\s*(https?://\S+)")
 BUFFER_PROGRESS = re.compile(r"Buffering:\s*(\d+)%")
@@ -88,7 +92,9 @@ class UnarrHandler(SimpleHTTPRequestHandler):
         if request.path == "/api/trakt/search":
             return self.trakt_search(parse_qs(request.query))
         if request.path == "/api/settings/backup":
-            return self.settings_backup()
+            return self.database_backup()
+        if request.path == "/api/database/backup":
+            return self.database_backup()
         if request.path.startswith("/api/trakt/image/"):
             return self.trakt_image(request.path[len("/api/trakt/image/"):], head_only=False)
         if request.path.startswith("/api/stream/"):
@@ -107,10 +113,12 @@ class UnarrHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in {"/api/download", "/api/stream", "/api/stream/tracks", "/api/library/stream", "/api/library/action", "/api/library/ai-match", "/api/library/matches/import", "/api/trakt/settings", "/api/trakt/auth", "/api/trakt/scrobble", "/api/trakt/watchlist", "/api/torrentclaw/settings", "/api/ai/settings", "/api/torrentclaw/releases", "/api/torrentclaw/debrid/play", "/api/torrentclaw/debrid/download", "/api/settings/restore"}:
+        if path not in {"/api/download", "/api/stream", "/api/stream/tracks", "/api/library/stream", "/api/library/action", "/api/library/ai-match", "/api/library/matches/import", "/api/trakt/settings", "/api/trakt/auth", "/api/trakt/scrobble", "/api/trakt/watchlist", "/api/torrentclaw/settings", "/api/ai/settings", "/api/torrentclaw/releases", "/api/torrentclaw/debrid/play", "/api/torrentclaw/debrid/download", "/api/settings/restore", "/api/database/restore"}:
             return self.error_json(404, "Not found.")
         if not self.same_origin():
             return self.error_json(403, "Cross-origin requests are not allowed.")
+        if path == "/api/database/restore":
+            return self.database_restore()
         body = self.read_json()
         if body is None:
             return self.error_json(400, "A valid JSON request is required.")
@@ -266,16 +274,23 @@ class UnarrHandler(SimpleHTTPRequestHandler):
                 item.update(linked=True, trakt=link, image=link.get("image"), title=link.get("title") or item["title"], released=link.get("released"))
             items.append(item)
         cloud, favorites = [], []
+        remote_loaders = {}
         if source in {"all", "cloud"}:
-            try:
-                cloud = self.server.get_cloud_library()
-            except RuntimeError:
-                cloud = []
+            remote_loaders["cloud"] = self.server.get_cloud_library
         if source in {"all", "favorites"}:
-            try:
-                favorites = self.server.get_trakt_favorites()
-            except (RuntimeError, PermissionError, urllib.error.URLError):
-                favorites = []
+            remote_loaders["favorites"] = self.server.get_trakt_favorites
+        if remote_loaders:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(remote_loaders)) as executor:
+                pending = {name: executor.submit(loader) for name, loader in remote_loaders.items()}
+                for name, future in pending.items():
+                    try:
+                        value = future.result()
+                    except (RuntimeError, PermissionError, urllib.error.URLError):
+                        value = []
+                    if name == "cloud":
+                        cloud = value
+                    else:
+                        favorites = value
         selected = {"local": items, "cloud": cloud, "favorites": favorites}.get(source, items + cloud + favorites)
         selected, cleanup = self.server.clean_library_items(selected)
         title_query = (((query or {}).get("q") or [""])[0]).strip().casefold()
@@ -344,6 +359,44 @@ class UnarrHandler(SimpleHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
+
+    def database_backup(self):
+        username = re.sub(r"[^A-Za-z0-9_-]", "-", self.server.trakt_user_name() or "local")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / f"unarr-web-{username}-backup.sqlite3"
+            self.server.database.backup_to(path)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.sqlite3")
+            self.send_header("Content-Disposition", f'attachment; filename="{path.name}"')
+            self.send_header("Content-Length", str(path.stat().st_size))
+            self.end_headers()
+            with path.open("rb") as backup:
+                shutil.copyfileobj(backup, self.wfile)
+
+    def database_restore(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if length < 100 or length > 256 * 1024 * 1024:
+            return self.error_json(400, "A SQLite backup smaller than 256 MB is required.")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "restore.sqlite3"
+            remaining = length
+            with path.open("wb") as output:
+                while remaining:
+                    chunk = self.rfile.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        return self.error_json(400, "The SQLite upload was incomplete.")
+                    output.write(chunk)
+                    remaining -= len(chunk)
+            try:
+                self.server.restore_database(path)
+            except ValueError as error:
+                return self.error_json(400, str(error))
+            except OSError as error:
+                return self.error_json(500, f"Could not restore database: {error}")
+        return self.send_json({"ok": True, "restored": True, "settings": self.server.get_trakt_settings()})
 
     def trakt_image(self, image_id, head_only=False):
         if not re.fullmatch(r"[a-f0-9]{32}", image_id):
@@ -535,7 +588,14 @@ class UnarrServer(ThreadingHTTPServer):
         HLS_ROOT.mkdir(parents=True, exist_ok=True)
         TRAKT_IMAGE_ROOT.mkdir(parents=True, exist_ok=True)
         TORBOX_MEDIA_ROOT.mkdir(parents=True, exist_ok=True)
+        self.database = AppDatabase(DATABASE_FILE)
         saved_trakt = self.load_trakt_settings()
+        if self.database.is_empty() and saved_trakt:
+            legacy_links = saved_trakt.pop("library_links", {})
+            self.database.save_settings(saved_trakt)
+            if isinstance(legacy_links, dict):
+                self.database.save_matches(legacy_links)
+        saved_trakt = self.database.load_settings()
         self.trakt_client_id = os.environ.get("TRAKT_CLIENT_ID", saved_trakt.get("client_id", ""))
         self.trakt_client_secret = os.environ.get("TRAKT_CLIENT_SECRET", saved_trakt.get("client_secret", ""))
         self.trakt_access_token = os.environ.get("TRAKT_ACCESS_TOKEN", saved_trakt.get("access_token", ""))
@@ -545,7 +605,7 @@ class UnarrServer(ThreadingHTTPServer):
         self.torbox_api_key = os.environ.get("TORBOX_API_KEY", saved_trakt.get("torbox_api_key", ""))
         self.openai_api_key = os.environ.get("OPENAI_API_KEY", saved_trakt.get("openai_api_key", ""))
         self.openai_model = saved_trakt.get("openai_model", "gpt-5.6-luna")
-        self.library_links = saved_trakt.get("library_links", {}) if isinstance(saved_trakt.get("library_links", {}), dict) else {}
+        self.library_links = self.database.load_matches()
         self.trakt_auth = {"status": "idle"}
         self.trakt_auth_id = None
         self.trakt_cache = None
@@ -572,7 +632,6 @@ class UnarrServer(ThreadingHTTPServer):
         return {}
 
     def write_trakt_settings(self):
-        TRAKT_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "client_id": self.trakt_client_id, "client_secret": self.trakt_client_secret,
             "access_token": self.trakt_access_token, "refresh_token": self.trakt_refresh_token,
@@ -580,12 +639,25 @@ class UnarrServer(ThreadingHTTPServer):
             "torrentclaw_api_key": getattr(self, "torrentclaw_api_key", ""),
             "torbox_api_key": getattr(self, "torbox_api_key", ""),
             "openai_api_key": getattr(self, "openai_api_key", ""), "openai_model": getattr(self, "openai_model", "gpt-5.6-luna"),
-            "library_links": getattr(self, "library_links", {}),
         }
-        temporary = TRAKT_SETTINGS_FILE.with_suffix(".tmp")
-        temporary.write_text(json.dumps(payload, indent=2))
-        temporary.chmod(0o600)
-        temporary.replace(TRAKT_SETTINGS_FILE)
+        self.database.save_settings(payload)
+
+    def restore_database(self, path):
+        self.database.restore_from(path)
+        saved = self.database.load_settings()
+        with self.trakt_lock:
+            self.trakt_client_id = saved.get("client_id", "")
+            self.trakt_client_secret = saved.get("client_secret", "")
+            self.trakt_access_token = saved.get("access_token", "")
+            self.trakt_refresh_token = saved.get("refresh_token", "")
+            self.trakt_user = saved.get("user")
+            self.torrentclaw_api_key = saved.get("torrentclaw_api_key", "")
+            self.torbox_api_key = saved.get("torbox_api_key", "")
+            self.openai_api_key = saved.get("openai_api_key", "")
+            self.openai_model = saved.get("openai_model", "gpt-5.6-luna")
+            self.library_links = self.database.load_matches()
+            self.torbox_index, self.torbox_index_time = [], 0
+            self.trakt_cache = self.trakt_favorites_cache = None
 
     def get_trakt_settings(self):
         return {
@@ -692,7 +764,7 @@ class UnarrServer(ThreadingHTTPServer):
                 continue
             self.library_links[item_id] = {"type": media_type, "traktId": trakt_id, "title": str(mapping.get("title") or "Matched title")[:300], "image": str(mapping.get("image") or "")[:1000], "released": str(mapping.get("released") or "")[:40]}
             imported += 1
-        self.write_trakt_settings()
+        self.database.save_matches(self.library_links)
         return {"ok": True, "imported": imported}
 
     def save_torrentclaw_settings(self, body):
@@ -872,9 +944,21 @@ class UnarrServer(ThreadingHTTPServer):
     def refresh_torbox_index(self):
         if self.torbox_index and time.time() - self.torbox_index_time < 60:
             return self.torbox_index
-        data = self.torbox_request("mylist?" + urllib.parse.urlencode({"bypass_cache": "true", "limit": 1000}))
+        if not self.torbox_index:
+            cached, synced_at = self.database.get_provider_cache("torbox")
+            if isinstance(cached, list):
+                self.torbox_index, self.torbox_index_time = cached, synced_at
+                if time.time() - synced_at < 60:
+                    return self.torbox_index
+        try:
+            data = self.torbox_request("mylist?" + urllib.parse.urlencode({"bypass_cache": "true", "limit": 1000}))
+        except RuntimeError:
+            if self.torbox_index:
+                return self.torbox_index
+            raise
         self.torbox_index = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
         self.torbox_index_time = time.time()
+        self.database.cache_provider("torbox", self.torbox_index)
         return self.torbox_index
 
     def get_cloud_library(self):
@@ -904,6 +988,7 @@ class UnarrServer(ThreadingHTTPServer):
                     "episode": (self.library_episode({"fileName": name}) or (None, None))[1],
                     "folderTitle": Path(full_name).parent.name if Path(full_name).parent.name not in {"", "."} else str(torrent.get("name") or ""),
                 })
+        self.database.replace_library_items("cloud", values)
         return values
 
     @staticmethod
@@ -974,6 +1059,11 @@ class UnarrServer(ThreadingHTTPServer):
     def get_trakt_favorites(self):
         if not self.trakt_access_token:
             return []
+        if self.trakt_favorites_cache is None:
+            cached, synced_at = self.database.get_provider_cache("trakt_favorites")
+            if isinstance(cached, list):
+                self.trakt_favorites_cache = cached
+                self.trakt_favorites_cache_time = time.monotonic() - max(0, time.time() - synced_at)
         if self.trakt_favorites_cache is not None and time.monotonic() - self.trakt_favorites_cache_time < 300:
             return self.trakt_favorites_cache
         values = []
@@ -984,6 +1074,8 @@ class UnarrServer(ThreadingHTTPServer):
                 values.append(item)
         self.trakt_favorites_cache = values
         self.trakt_favorites_cache_time = time.monotonic()
+        self.database.cache_provider("trakt_favorites", values)
+        self.database.replace_library_items("favorites", values)
         return values
 
     def library_action(self, body):
@@ -995,7 +1087,7 @@ class UnarrServer(ThreadingHTTPServer):
             if media_type not in {"movie", "show"} or isinstance(trakt_id, bool) or not isinstance(trakt_id, int) or trakt_id < 1:
                 raise ValueError("Choose a valid Trakt movie or show.")
             self.library_links[item_id] = {"type": media_type, "traktId": trakt_id, "title": str(title or "Matched title")[:300], "image": str(body.get("image") or "")[:1000], "released": str(body.get("released") or "")[:40]}
-            self.write_trakt_settings()
+            self.database.save_match(item_id, self.library_links[item_id])
             return {"ok": True, "linked": self.library_links[item_id]}
         if action == "unfavorite":
             match = re.fullmatch(r"favorite:(movie|show):(\d+)", item_id)
@@ -1018,7 +1110,7 @@ class UnarrServer(ThreadingHTTPServer):
                 self.torbox_index = []
                 self.torbox_index_time = 0
                 self.library_links.pop(item_id, None)
-                self.write_trakt_settings()
+                self.database.delete_match(item_id)
                 return {"ok": True}
         if action == "delete":
             item = next((value for value in self.reconcile_library().get("items", []) if self.library_item_id(value) == item_id), None)
@@ -1652,8 +1744,16 @@ class UnarrServer(ThreadingHTTPServer):
         return result
 
     def search_trakt(self, query, sort="recommended"):
-        encoded = urllib.parse.urlencode({"query": query, "limit": 20})
-        values = self.trakt_request(f"/search/movie,show?{encoded}")
+        cache_key = "trakt_search:" + hashlib.sha256(query.strip().casefold().encode()).hexdigest()
+        values, synced_at = self.database.get_provider_cache(cache_key)
+        if not isinstance(values, list) or time.time() - synced_at > 30 * 24 * 60 * 60:
+            encoded = urllib.parse.urlencode({"query": query, "limit": 20})
+            try:
+                values = self.trakt_request(f"/search/movie,show?{encoded}")
+                self.database.cache_provider(cache_key, values)
+            except (RuntimeError, PermissionError, urllib.error.URLError):
+                if not isinstance(values, list):
+                    raise
         results = [self.normalize_trakt_item(value, "search") for value in values[:20]]
         key = (lambda item: item.get("votes") or 0) if sort == "popular" else (lambda item: item.get("score") or 0)
         return sorted(results, key=key, reverse=True)
@@ -1765,6 +1865,7 @@ class UnarrServer(ThreadingHTTPServer):
             elif snapshot != self.library_snapshot:
                 self.library_snapshot = snapshot
                 self.schedule_library_scan(roots)
+            self.database.replace_library_items("local", live_items)
             return {**cache, "items": live_items, "refreshedAt": time.time(), "roots": [str(root) for root in roots]}
 
     @staticmethod

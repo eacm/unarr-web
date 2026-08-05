@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import Mock, patch
 from pathlib import Path
 from types import SimpleNamespace
+from database import AppDatabase
 from server import BUFFER_PROGRESS, DOWNLOAD_PROGRESS, FILTERS, INFO_HASH, STREAM_URL, TEXT_SUBTITLE_CODECS, UnarrServer
 
 
@@ -226,10 +227,38 @@ class ValidationTests(unittest.TestCase):
         server.trakt_access_token = ""
         server.trakt_refresh_token = ""
         server.trakt_user = None
-        with tempfile.TemporaryDirectory() as directory, patch("server.TRAKT_SETTINGS_FILE", Path(directory) / "trakt.json") as settings_file:
+        with tempfile.TemporaryDirectory() as directory:
+            settings_file = Path(directory) / "unarr-web.sqlite3"
+            server.database = AppDatabase(settings_file)
             server.write_trakt_settings()
             self.assertEqual(settings_file.stat().st_mode & 0o777, 0o600)
-            self.assertEqual(json.loads(settings_file.read_text())["client_id"], "client-id")
+            self.assertEqual(server.database.load_settings()["client_id"], "client-id")
+
+    def test_sqlite_backup_round_trip_includes_matches_and_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = AppDatabase(root / "source.sqlite3")
+            database.save_settings({"client_id": "client-id"})
+            database.save_match("local:one", {"type": "movie", "traktId": 42, "title": "Example"})
+            database.cache_provider("torbox", [{"id": 7}])
+            database.replace_library_items("local", [{"id": "local:one", "title": "Example"}])
+            backup = root / "backup.sqlite3"
+            database.backup_to(backup)
+            restored = AppDatabase(root / "restored.sqlite3")
+            restored.restore_from(backup)
+            self.assertEqual(restored.load_settings()["client_id"], "client-id")
+            self.assertEqual(restored.load_matches()["local:one"]["traktId"], 42)
+            self.assertEqual(restored.get_provider_cache("torbox")[0][0]["id"], 7)
+            self.assertEqual(restored.get_library_items("local")[0]["title"], "Example")
+
+    def test_sqlite_restore_rejects_unrelated_database(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            invalid = root / "invalid.sqlite3"
+            invalid.write_bytes(b"not sqlite")
+            database = AppDatabase(root / "current.sqlite3")
+            with self.assertRaisesRegex(ValueError, "valid SQLite"):
+                database.restore_from(invalid)
 
     def test_settings_backup_is_scoped_to_connected_user(self):
         server = object.__new__(UnarrServer)
@@ -283,8 +312,11 @@ class ValidationTests(unittest.TestCase):
         ])
         server.trakt_lock = threading.Lock()
         server.trakt_images = {}
-        self.assertEqual(server.search_trakt("test", "recommended")[0]["title"], "Relevant")
-        self.assertEqual(server.search_trakt("test", "popular")[0]["title"], "Popular")
+        with tempfile.TemporaryDirectory() as directory:
+            server.database = AppDatabase(Path(directory) / "test.sqlite3")
+            self.assertEqual(server.search_trakt("test", "recommended")[0]["title"], "Relevant")
+            self.assertEqual(server.search_trakt("test", "popular")[0]["title"], "Popular")
+            self.assertEqual(server.trakt_request.call_count, 1)
 
     def test_live_search_has_no_sort_control(self):
         web = Path(__file__).parent / "web"

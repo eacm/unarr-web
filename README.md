@@ -2,6 +2,8 @@
 
 A local-first web interface for the [unarr CLI](https://github.com/Unarr-app/unarr-cli). It uses the `unarr` already installed and configured on your machine; credentials stay with the CLI.
 
+Persistent application state is stored in `.data/unarr-web.sqlite3`. SQLite holds settings, library matches, local/provider item snapshots, and provider response caches so the Library view can render without repeating per-item metadata requests. Existing JSON settings are migrated automatically on first startup and retained as a legacy fallback copy.
+
 ## Run
 
 Requirements: Python 3.9+ and `unarr` on your `PATH`. There are no third-party dependencies.
@@ -47,6 +49,10 @@ Scanned audio tracks can be selected before playback. Text subtitle formats are 
 Playback opens in a dedicated dark player page that shows preparation progress and the scanned total runtime. The catalog and library use the same dark theme.
 
 The server listens only on loopback by default. If you expose it to a network, put an authenticated TLS reverse proxy in front of it.
+
+## Database backup
+
+Settings includes controls to download and restore a complete `.sqlite3` backup. Export uses SQLite's online backup API, so the snapshot is consistent while the server is running. Restore performs an integrity check and validates the unarr-web schema before replacing current state. Backups contain credentials, tokens, API keys, matches, and cached library metadata; store them privately.
 
 ## Development
 
