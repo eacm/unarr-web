@@ -7,6 +7,8 @@ import argparse
 import concurrent.futures
 import datetime
 import hashlib
+import html
+import gzip
 import json
 import os
 import re
@@ -32,6 +34,7 @@ LIBRARY_CACHE = DATA_ROOT / "library.json"
 HLS_ROOT = Path(os.environ.get("UNARR_WEB_HLS_DIR", ROOT / ".cache" / "hls"))
 TRAKT_IMAGE_ROOT = ROOT / ".cache" / "trakt-images"
 TORBOX_MEDIA_ROOT = ROOT / ".cache" / "torbox-media"
+PRIVATE_TORRENT_ROOT = ROOT / ".data" / "private-torrents"
 LEGACY_TRAKT_SETTINGS_FILE = ROOT / ".cache" / "trakt-settings.json"
 TRAKT_SETTINGS_FILE = Path(os.environ.get("UNARR_WEB_TRAKT_SETTINGS", ROOT / ".data" / "user-settings.json"))
 DATABASE_FILE = Path(os.environ.get("UNARR_WEB_DATABASE", ROOT / ".data" / "unarr-web.sqlite3"))
@@ -48,6 +51,17 @@ FILTERS = {
     "type": ("--type", {"movie", "show"}),
     "quality": ("--quality", {"480p", "720p", "1080p", "2160p"}),
     "sort": ("--sort", {"relevance", "seeders", "year", "rating", "added"}),
+}
+TORRENTDAY_URLS = (
+    "https://tday.love/", "https://torrentday.cool/", "https://secure.torrentday.com/",
+    "https://classic.torrentday.com/", "https://www.torrentday.com/", "https://www.torrentday.me/",
+    "https://torrentday.it/", "https://td.findnemo.net/", "https://td.getcrazy.me/", "https://td.venom.global/",
+    "https://td.workisboring.net/", "https://tday.findnemo.net/", "https://tday.getcrazy.me/", "https://tday.venom.global/",
+    "https://tday.workisboring.net/",
+)
+TORRENTDAY_CATEGORIES = {
+    "movie": (25, 96, 11, 5, 103, 3, 21, 22, 13, 44, 48, 1),
+    "show": (24, 104, 32, 31, 33, 46, 82, 14, 26, 7, 34, 2),
 }
 
 
@@ -97,6 +111,8 @@ class UnarrHandler(SimpleHTTPRequestHandler):
             return self.send_json(self.server.get_trakt_settings())
         if request.path == "/api/torrentclaw/settings":
             return self.send_json(self.server.get_torrentclaw_settings())
+        if request.path == "/api/private-trackers/settings":
+            return self.send_json(self.server.get_private_tracker_settings())
         if request.path == "/api/ai/settings":
             return self.send_json(self.server.get_ai_settings())
         if request.path == "/api/library/matches/export":
@@ -131,7 +147,7 @@ class UnarrHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in {"/api/download", "/api/stream", "/api/stream/tracks", "/api/library/stream", "/api/library/action", "/api/library/ai-match", "/api/library/matches/import", "/api/trakt/settings", "/api/trakt/auth", "/api/trakt/scrobble", "/api/trakt/watchlist", "/api/trakt/history", "/api/trakt/playback/remove", "/api/torrentclaw/settings", "/api/ai/settings", "/api/torrentclaw/releases", "/api/torrentclaw/debrid/play", "/api/torrentclaw/debrid/download", "/api/settings/restore", "/api/database/restore"}:
+        if path not in {"/api/download", "/api/stream", "/api/stream/tracks", "/api/library/stream", "/api/library/action", "/api/library/ai-match", "/api/library/matches/import", "/api/trakt/settings", "/api/trakt/auth", "/api/trakt/scrobble", "/api/trakt/watchlist", "/api/trakt/history", "/api/trakt/playback/remove", "/api/torrentclaw/settings", "/api/private-trackers/settings", "/api/ai/settings", "/api/torrentclaw/releases", "/api/torrentclaw/debrid/play", "/api/torrentclaw/debrid/download", "/api/settings/restore", "/api/database/restore"}:
             return self.error_json(404, "Not found.")
         if not self.same_origin():
             return self.error_json(403, "Cross-origin requests are not allowed.")
@@ -161,6 +177,13 @@ class UnarrHandler(SimpleHTTPRequestHandler):
                 return self.error_json(400, str(error))
             except OSError as error:
                 return self.error_json(500, f"Could not save TorrentClaw settings: {error}")
+        if path == "/api/private-trackers/settings":
+            try:
+                return self.send_json(self.server.save_private_tracker_settings(body))
+            except ValueError as error:
+                return self.error_json(400, str(error))
+            except OSError as error:
+                return self.error_json(500, f"Could not save private tracker settings: {error}")
         if path == "/api/ai/settings":
             try:
                 return self.send_json(self.server.save_ai_settings(body))
@@ -539,7 +562,7 @@ class UnarrHandler(SimpleHTTPRequestHandler):
         """Start a long-running download without tying it to the HTTP request."""
         try:
             process = subprocess.Popen(
-                [self.server.unarr_bin, "download", info_hash, "--no-color"],
+                [self.server.unarr_bin, "download", self.server.private_magnet(info_hash), "--no-color"],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -650,6 +673,9 @@ class UnarrServer(ThreadingHTTPServer):
         HLS_ROOT.mkdir(parents=True, exist_ok=True)
         TRAKT_IMAGE_ROOT.mkdir(parents=True, exist_ok=True)
         TORBOX_MEDIA_ROOT.mkdir(parents=True, exist_ok=True)
+        PRIVATE_TORRENT_ROOT.mkdir(parents=True, exist_ok=True)
+        PRIVATE_TORRENT_ROOT.chmod(0o700)
+        self.clean_private_torrent_cache()
         self.database = AppDatabase(DATABASE_FILE)
         saved_trakt = self.load_trakt_settings()
         if self.database.is_empty() and saved_trakt:
@@ -665,6 +691,9 @@ class UnarrServer(ThreadingHTTPServer):
         self.trakt_user = saved_trakt.get("user")
         self.torrentclaw_api_key = os.environ.get("TORRENTCLAW_API_KEY", saved_trakt.get("torrentclaw_api_key", ""))
         self.torbox_api_key = os.environ.get("TORBOX_API_KEY", saved_trakt.get("torbox_api_key", ""))
+        self.torrentday_cookie = os.environ.get("TORRENTDAY_COOKIE", saved_trakt.get("torrentday_cookie", ""))
+        self.torrentday_base_url = saved_trakt.get("torrentday_base_url", TORRENTDAY_URLS[0])
+        self.torrentday_freeleech = bool(saved_trakt.get("torrentday_freeleech", False))
         self.openai_api_key = os.environ.get("OPENAI_API_KEY", saved_trakt.get("openai_api_key", ""))
         self.openai_model = saved_trakt.get("openai_model", "gpt-5.6-luna")
         self.library_links = self.database.load_matches()
@@ -737,6 +766,9 @@ class UnarrServer(ThreadingHTTPServer):
             "user": self.trakt_user,
             "torrentclaw_api_key": getattr(self, "torrentclaw_api_key", ""),
             "torbox_api_key": getattr(self, "torbox_api_key", ""),
+            "torrentday_cookie": getattr(self, "torrentday_cookie", ""),
+            "torrentday_base_url": getattr(self, "torrentday_base_url", TORRENTDAY_URLS[0]),
+            "torrentday_freeleech": bool(getattr(self, "torrentday_freeleech", False)),
             "openai_api_key": getattr(self, "openai_api_key", ""), "openai_model": getattr(self, "openai_model", "gpt-5.6-luna"),
         }
         self.database.save_settings(payload)
@@ -752,6 +784,9 @@ class UnarrServer(ThreadingHTTPServer):
             self.trakt_user = saved.get("user")
             self.torrentclaw_api_key = saved.get("torrentclaw_api_key", "")
             self.torbox_api_key = saved.get("torbox_api_key", "")
+            self.torrentday_cookie = saved.get("torrentday_cookie", "")
+            self.torrentday_base_url = saved.get("torrentday_base_url", TORRENTDAY_URLS[0])
+            self.torrentday_freeleech = bool(saved.get("torrentday_freeleech", False))
             self.openai_api_key = saved.get("openai_api_key", "")
             self.openai_model = saved.get("openai_model", "gpt-5.6-luna")
             self.library_links = self.database.load_matches()
@@ -770,6 +805,29 @@ class UnarrServer(ThreadingHTTPServer):
 
     def get_torrentclaw_settings(self):
         return {"configured": bool(self.torrentclaw_api_key), "hasApiKey": bool(self.torrentclaw_api_key), "hasTorBoxKey": bool(self.torbox_api_key), "debridProvider": "torbox" if self.torbox_api_key else "", "baseUrl": "https://torrentclaw.com"}
+
+    def get_private_tracker_settings(self):
+        cookie = getattr(self, "torrentday_cookie", "")
+        return {"configured": bool(cookie), "hasCookie": bool(cookie),
+                "baseUrl": getattr(self, "torrentday_base_url", TORRENTDAY_URLS[0]), "baseUrls": list(TORRENTDAY_URLS),
+                "freeleechOnly": bool(getattr(self, "torrentday_freeleech", False))}
+
+    def save_private_tracker_settings(self, body):
+        cookie, base_url = body.get("cookie", ""), body.get("baseUrl", TORRENTDAY_URLS[0])
+        freeleech = body.get("freeleechOnly", False)
+        if not isinstance(cookie, str) or len(cookie) > 8192 or "\r" in cookie or "\n" in cookie:
+            raise ValueError("Enter a valid TorrentDay cookie header.")
+        if base_url not in TORRENTDAY_URLS:
+            raise ValueError("Choose a supported TorrentDay address.")
+        if not isinstance(freeleech, bool):
+            raise ValueError("Freeleech only must be on or off.")
+        if cookie.strip():
+            if "=" not in cookie:
+                raise ValueError("Paste the full Cookie request header (name=value; name=value).")
+            self.torrentday_cookie = cookie.strip()
+        self.torrentday_base_url, self.torrentday_freeleech = base_url, freeleech
+        self.write_trakt_settings()
+        return self.get_private_tracker_settings()
 
     def get_ai_settings(self):
         return {"configured": bool(self.openai_api_key), "hasApiKey": bool(self.openai_api_key), "model": self.openai_model}
@@ -895,6 +953,7 @@ class UnarrServer(ThreadingHTTPServer):
                 "user": self.trakt_user,
             },
             "torrentclaw": {"apiKey": getattr(self, "torrentclaw_api_key", ""), "torboxApiKey": getattr(self, "torbox_api_key", "")},
+            "privateTrackers": {"torrentDay": {"cookie": getattr(self, "torrentday_cookie", ""), "baseUrl": getattr(self, "torrentday_base_url", TORRENTDAY_URLS[0]), "freeleechOnly": bool(getattr(self, "torrentday_freeleech", False))}},
             "ai": {"apiKey": getattr(self, "openai_api_key", ""), "model": getattr(self, "openai_model", "gpt-5.6-luna")},
             "libraryLinks": getattr(self, "library_links", {}),
         }
@@ -915,6 +974,10 @@ class UnarrServer(ThreadingHTTPServer):
         if not isinstance(torrentclaw, dict) or not isinstance(api_key, str) or len(api_key) > 1000 or not isinstance(torbox_key, str) or len(torbox_key) > 1000:
             raise ValueError("The backup contains invalid TorrentClaw settings.")
         ai = backup.get("ai") or {}
+        torrentday = (backup.get("privateTrackers") or {}).get("torrentDay") or {}
+        td_cookie, td_url, td_free = torrentday.get("cookie", ""), torrentday.get("baseUrl", TORRENTDAY_URLS[0]), torrentday.get("freeleechOnly", False)
+        if not isinstance(torrentday, dict) or not isinstance(td_cookie, str) or len(td_cookie) > 8192 or td_url not in TORRENTDAY_URLS or not isinstance(td_free, bool):
+            raise ValueError("The backup contains invalid private tracker settings.")
         openai_key, openai_model = ai.get("apiKey", ""), ai.get("model", "gpt-5.6-luna")
         library_links = backup.get("libraryLinks") or {}
         if not isinstance(ai, dict) or not isinstance(openai_key, str) or len(openai_key) > 1000 or openai_model not in {"gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"} or not isinstance(library_links, dict):
@@ -930,6 +993,7 @@ class UnarrServer(ThreadingHTTPServer):
             self.trakt_cache = None
             self.torrentclaw_api_key = api_key
             self.torbox_api_key = torbox_key
+            self.torrentday_cookie, self.torrentday_base_url, self.torrentday_freeleech = td_cookie, td_url, td_free
             self.openai_api_key = openai_key
             self.openai_model = openai_model
             self.library_links = library_links
@@ -952,9 +1016,208 @@ class UnarrServer(ThreadingHTTPServer):
                 raise RuntimeError("TorrentClaw rate limit reached; try again shortly") from error
             raise RuntimeError(f"TorrentClaw returned HTTP {error.code}") from error
 
+    @staticmethod
+    def _bencode_end(data, offset=0):
+        if offset >= len(data):
+            raise ValueError("Truncated torrent metadata.")
+        token = data[offset:offset + 1]
+        if token == b"i":
+            end = data.find(b"e", offset + 1)
+            if end < 0:
+                raise ValueError("Invalid torrent integer.")
+            int(data[offset + 1:end])
+            return end + 1
+        if token in {b"l", b"d"}:
+            cursor = offset + 1
+            while cursor < len(data) and data[cursor:cursor + 1] != b"e":
+                cursor = UnarrServer._bencode_end(data, cursor)
+                if token == b"d":
+                    cursor = UnarrServer._bencode_end(data, cursor)
+            if cursor >= len(data):
+                raise ValueError("Unterminated torrent container.")
+            return cursor + 1
+        colon = data.find(b":", offset, min(len(data), offset + 24))
+        if colon < 0:
+            raise ValueError("Invalid torrent string.")
+        length = int(data[offset:colon])
+        end = colon + 1 + length
+        if length < 0 or end > len(data):
+            raise ValueError("Truncated torrent string.")
+        return end
+
+    @staticmethod
+    def torrent_metadata(data):
+        if not isinstance(data, bytes) or not data.startswith(b"d") or len(data) > 10 * 1024 * 1024:
+            raise ValueError("TorrentDay returned invalid torrent metadata.")
+        cursor, info_slice, trackers = 1, None, []
+        while cursor < len(data) and data[cursor:cursor + 1] != b"e":
+            key_end = UnarrServer._bencode_end(data, cursor)
+            colon = data.find(b":", cursor, key_end)
+            key = data[colon + 1:key_end]
+            value_start = key_end
+            value_end = UnarrServer._bencode_end(data, value_start)
+            if key == b"info":
+                info_slice = data[value_start:value_end]
+            elif key == b"announce":
+                value_colon = data.find(b":", value_start, value_end)
+                trackers.append(data[value_colon + 1:value_end].decode("utf-8", "ignore"))
+            cursor = value_end
+        if not info_slice:
+            raise ValueError("Torrent metadata has no info dictionary.")
+        return hashlib.sha1(info_slice).hexdigest(), [value for value in trackers if value.startswith(("http://", "https://", "udp://"))]
+
+    def _torrentday_fetch(self, url):
+        parsed = urllib.parse.urlparse(url)
+        allowed = {urllib.parse.urlparse(value).hostname for value in TORRENTDAY_URLS}
+        if parsed.scheme != "https" or parsed.hostname not in allowed:
+            raise RuntimeError("TorrentDay returned an unsafe download address.")
+        request = urllib.request.Request(url, headers={"Accept": "application/json, application/x-bittorrent", "Cookie": self.torrentday_cookie, "User-Agent": "unarr-web/0.1"})
+        try:
+            with urllib.request.urlopen(request, timeout=25) as response:
+                if urllib.parse.urlparse(response.geturl()).hostname not in allowed:
+                    raise RuntimeError("TorrentDay redirected outside its supported addresses.")
+                data = response.read(10 * 1024 * 1024 + 1)
+                if len(data) > 10 * 1024 * 1024:
+                    raise RuntimeError("TorrentDay response was too large.")
+                if data.startswith(b"\x1f\x8b"):
+                    try:
+                        data = gzip.decompress(data)
+                    except (OSError, EOFError) as error:
+                        raise RuntimeError("TorrentDay returned invalid compressed data.") from error
+                    if len(data) > 10 * 1024 * 1024:
+                        raise RuntimeError("TorrentDay decompressed response was too large.")
+                return data
+        except urllib.error.HTTPError as error:
+            if error.code in {401, 403}:
+                raise PermissionError("TorrentDay cookie was rejected; copy a fresh Cookie header from your browser.") from error
+            raise RuntimeError(f"TorrentDay returned HTTP {error.code}.") from error
+
+    @staticmethod
+    def release_traits(title):
+        quality = next((value for value in ("2160p", "1080p", "720p", "480p") if value.lower() in title.lower()), "Unknown")
+        codec = "HEVC" if re.search(r"\b(?:x265|h.?265|hevc)\b", title, re.I) else "AVC" if re.search(r"\b(?:x264|h.?264|avc)\b", title, re.I) else ""
+        score = {"2160p": 400, "1080p": 300, "720p": 200, "480p": 100}.get(quality, 0)
+        return quality, codec, score
+
+    @staticmethod
+    def clean_private_torrent_cache(max_age=7 * 24 * 60 * 60, max_files=400):
+        """Keep passkey-bearing torrent metadata private and bounded."""
+        now = time.time()
+        try:
+            files = sorted(
+                (path for path in PRIVATE_TORRENT_ROOT.iterdir() if path.is_file() and path.suffix in {".torrent", ".json"}),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            return
+        for index, path in enumerate(files):
+            try:
+                path.chmod(0o600)
+                if index >= max_files or now - path.stat().st_mtime > max_age:
+                    path.unlink()
+            except OSError:
+                continue
+
+    @staticmethod
+    def parse_torrentday_html(data, base_url, limit=12):
+        markup = data.decode("utf-8", "replace")
+        results = []
+        for match in re.finditer(r"<tr\b[^>]*>([\s\S]*?)</tr>", markup, re.I):
+            row = match.group(1)
+            name_cell = re.search(r'<td\b[^>]*class\s*=\s*["\'][^"\']*\btorrentNameInfo\b[^"\']*["\'][^>]*>([\s\S]*?)</td>', row, re.I)
+            if not name_cell:
+                continue
+            title = ""
+            for anchor in re.finditer(r"<a\b([^>]*)>([\s\S]*?)</a>", name_cell.group(1), re.I):
+                href = re.search(r'\bhref\s*=\s*["\']([^"\']*)["\']', anchor.group(1), re.I)
+                if href and re.match(r"^/t/\d+", html.unescape(href.group(1))):
+                    title = re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]*>", " ", anchor.group(2)))).strip()
+                    break
+            download_url = ""
+            for href in re.findall(r'\bhref\s*=\s*["\']([^"\']*)["\']', row, re.I):
+                href = html.unescape(href)
+                if re.match(r"^/download\.php/\d+/.+\.torrent(?:\?.*)?$", href, re.I):
+                    download_url = urllib.parse.urljoin(base_url, href)
+                    break
+            if not download_url:
+                continue
+            seed_cell = re.search(r'<td\b[^>]*class\s*=\s*["\'][^"\']*\bseedersInfo\b[^"\']*["\'][^>]*>([\s\S]*?)</td>', row, re.I)
+            seed_text = re.sub(r"<[^>]*>", " ", seed_cell.group(1)) if seed_cell else ""
+            size_match = re.search(r"([\d.]+)\s*(KB|MB|GB|TB)\b", re.sub(r"<[^>]*>", " ", row), re.I)
+            size = round(float(size_match.group(1)) * 1024 ** {"KB": 1, "MB": 2, "GB": 3, "TB": 4}[size_match.group(2).upper()]) if size_match else 0
+            torrent_id = re.search(r"/download\.php/(\d+)/", download_url, re.I).group(1)
+            results.append({"t": torrent_id, "name": title or "TorrentDay result", "downloadUrl": download_url,
+                            "seeders": int(re.search(r"\d+", seed_text).group()) if re.search(r"\d+", seed_text) else 0, "size": size})
+            if len(results) >= limit:
+                break
+        return results
+
+    def find_torrentday_releases(self, body):
+        if not getattr(self, "torrentday_cookie", ""):
+            return []
+        media_type, title = body.get("type"), body.get("title", "")
+        categories = ";".join(str(value) for value in TORRENTDAY_CATEGORIES[media_type])
+        terms = []
+        imdb_id = body.get("imdbId")
+        if isinstance(imdb_id, str) and re.fullmatch(r"tt\d{5,12}", imdb_id):
+            terms.append(imdb_id)
+        terms.append(title)
+        if media_type == "show":
+            terms.append(f"S{int(body['season']):02d}E{int(body['episode']):02d}")
+        url = f"{self.torrentday_base_url}t.json?{categories}{';free' if self.torrentday_freeleech else ''};q={urllib.parse.quote_plus(' '.join(terms))}"
+        json_data = self._torrentday_fetch(url)
+        try:
+            payload = json.loads(json_data)
+            rows = payload if isinstance(payload, list) else payload.get("results", []) if isinstance(payload, dict) else []
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            rows = []
+        if not rows:
+            if re.search(br"(?:/login\.php|name=[\"']login)", json_data, re.I):
+                raise PermissionError("TorrentDay session cookie is missing or expired.")
+            query = title + (f" S{int(body['season']):02d}E{int(body['episode']):02d}" if media_type == "show" else "")
+            html_url = urllib.parse.urljoin(self.torrentday_base_url, "/t") + "?" + urllib.parse.urlencode({"q": query, "qf": ""})
+            html_data = self._torrentday_fetch(html_url)
+            if re.search(br"(?:/login\.php|name=[\"']login)", html_data, re.I):
+                raise PermissionError("TorrentDay session cookie is missing or expired.")
+            rows = self.parse_torrentday_html(html_data, self.torrentday_base_url)
+
+        def convert(row):
+            torrent_id = str(row.get("t") or "")
+            if not torrent_id.isdigit():
+                return None
+            download_url = row.get("downloadUrl") or f"{self.torrentday_base_url}download.php/{torrent_id}/{torrent_id}.torrent"
+            data = self._torrentday_fetch(download_url)
+            info_hash, trackers = self.torrent_metadata(data)
+            path = PRIVATE_TORRENT_ROOT / f"{info_hash}.torrent"
+            path.write_bytes(data)
+            path.chmod(0o600)
+            metadata_path = PRIVATE_TORRENT_ROOT / f"{info_hash}.json"
+            metadata_path.write_text(json.dumps({"trackers": trackers}))
+            metadata_path.chmod(0o600)
+            raw_title = str(row.get("name") or title)[:500]
+            quality, codec, score = self.release_traits(raw_title)
+            return {"infoHash": info_hash, "rawTitle": raw_title, "quality": quality, "codec": codec,
+                    "sourceType": "Private tracker", "sizeBytes": int(row.get("size") or 0),
+                    "seeders": int(row.get("seeders") or 0), "qualityScore": score, "hdrType": "HDR" if "HDR" in raw_title.upper() else "",
+                    "audioCodec": "", "verified": True, "sourceGroup": "torrentday", "tracker": "TorrentDay", "private": True}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            releases = [value for value in executor.map(convert, [row for row in rows[:12] if isinstance(row, dict)]) if value]
+        self.clean_private_torrent_cache()
+        return releases
+
+    def private_magnet(self, info_hash):
+        metadata = PRIVATE_TORRENT_ROOT / f"{info_hash.lower()}.json"
+        try:
+            trackers = json.loads(metadata.read_text()).get("trackers", [])
+        except (OSError, json.JSONDecodeError):
+            trackers = []
+        return "magnet:?" + urllib.parse.urlencode([("xt", f"urn:btih:{info_hash}"), *(("tr", value) for value in trackers)]) if trackers else info_hash
+
     def find_torrentclaw_releases(self, body):
-        if not self.torrentclaw_api_key:
-            raise RuntimeError("Add a free TorrentClaw API key in Settings before playing.")
+        if not self.torrentclaw_api_key and not getattr(self, "torrentday_cookie", ""):
+            raise RuntimeError("Add a TorrentClaw API key or private tracker cookie in Settings before playing.")
         media_type = body.get("type")
         title = body.get("title", "")
         imdb_id = body.get("imdbId")
@@ -976,20 +1239,24 @@ class UnarrServer(ThreadingHTTPServer):
             if isinstance(episode, bool) or not isinstance(episode, int) or episode < 0 or episode > 9999:
                 raise ValueError("Select a valid episode.")
             params.update({"season": season, "episode": episode})
+        private_future = None
         if getattr(self, "torbox_api_key", ""):
             with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
                 library_future = executor.submit(self.find_torbox_library, body)
                 search_future = executor.submit(self.search_torbox, body)
-                torrentclaw_future = executor.submit(self.torrentclaw_request, params)
+                torrentclaw_future = executor.submit(self.torrentclaw_request, params) if self.torrentclaw_api_key else None
+                private_future = executor.submit(self.find_torrentday_releases, body)
                 torbox_library = library_future.result()
                 torbox_search = search_future.result()
-                response = torrentclaw_future.result()
+                response = torrentclaw_future.result() if torrentclaw_future else {"results": []}
+                private_releases = private_future.result()
         else:
             torbox_library, torbox_search = [], []
-            response = self.torrentclaw_request(params)
+            response = self.torrentclaw_request(params) if self.torrentclaw_api_key else {"results": []}
+            private_releases = self.find_torrentday_releases(body)
         torrents = [torrent for item in response.get("results", []) for torrent in item.get("torrents", []) if INFO_HASH.fullmatch(str(torrent.get("infoHash", "")))]
-        if not torrents:
-            raise LookupError("TorrentClaw found no playable torrent for this title.")
+        if not torrents and not private_releases:
+            raise LookupError("No configured release provider found a playable torrent for this title.")
         fields = ("infoHash", "rawTitle", "quality", "codec", "sourceType", "sizeBytes", "seeders", "qualityScore", "hdrType", "audioCodec", "verified")
         releases = [{key: torrent.get(key) for key in fields} for torrent in torrents]
         cached = self.torbox_cached([item["infoHash"] for item in releases]) if getattr(self, "torbox_api_key", "") else set()
@@ -997,6 +1264,10 @@ class UnarrServer(ThreadingHTTPServer):
             release["instant"] = release["infoHash"].lower() in cached
             release["debridProvider"] = "TorBox" if getattr(self, "torbox_api_key", "") else None
             release["sourceGroup"] = "torrentclaw"
+        private_cached = self.torbox_cached([item["infoHash"] for item in private_releases]) if getattr(self, "torbox_api_key", "") and private_releases else set()
+        for release in private_releases:
+            release["instant"] = release["infoHash"].lower() in private_cached
+            release["debridProvider"] = "TorBox" if getattr(self, "torbox_api_key", "") else None
         releases.sort(key=lambda item: (item["instant"], item.get("qualityScore") or 0, item.get("seeders") or 0), reverse=True)
         known = {item["infoHash"].lower() for item in torbox_library + torbox_search}
         releases = [item for item in releases if item["infoHash"].lower() not in known]
@@ -1004,18 +1275,21 @@ class UnarrServer(ThreadingHTTPServer):
             {"id": "torbox-library", "title": "Cached in your TorBox", "releases": torbox_library},
             {"id": "torbox-search", "title": "TorBox search", "releases": torbox_search},
             {"id": "torrentclaw", "title": "TorrentClaw results", "releases": releases},
-        ], "releases": torbox_library + torbox_search + releases, "debridConfigured": bool(getattr(self, "torbox_api_key", "")), "debridProvider": "TorBox" if getattr(self, "torbox_api_key", "") else None}
+            {"id": "torrentday", "title": "TorrentDay (private)", "releases": private_releases},
+        ], "releases": torbox_library + torbox_search + releases + private_releases, "debridConfigured": bool(getattr(self, "torbox_api_key", "")), "debridProvider": "TorBox" if getattr(self, "torbox_api_key", "") else None}
 
     def find_torrentclaw_release(self, body):
         """Compatibility helper for callers that still request one release."""
         return self.find_torrentclaw_releases(body)["releases"][0]
 
-    def torbox_request(self, path, *, form=None, json_body=None):
+    def torbox_request(self, path, *, form=None, json_body=None, files=None):
         if not self.torbox_api_key:
             raise RuntimeError("Add a TorBox API key in Settings first.")
         command = ["curl", "-sS", "--max-time", "45", "-H", f"Authorization: Bearer {self.torbox_api_key}", "-H", "Accept: application/json", "-H", "User-Agent: unarr-web/0.1"]
         for key, value in (form or {}).items():
             command.extend(["-F", f"{key}={value}"])
+        for key, value in (files or {}).items():
+            command.extend(["-F", f"{key}=@{value}"])
         if json_body is not None:
             command.extend(["-H", "Content-Type: application/json", "--data", json.dumps(json_body, separators=(",", ":"))])
         command.append(f"https://api.torbox.app/v1/api/torrents/{path}")
@@ -1339,10 +1613,13 @@ class UnarrServer(ThreadingHTTPServer):
         job_id = self.add_activity("torbox", info_hash, "Opening instant TorBox stream" if play else "Adding download to TorBox", title=file_name, media_type="stream" if play else "download")
         try:
             if not torrent_id:
-                form = {"magnet": f"magnet:?xt=urn:btih:{info_hash}"}
+                private_torrent = PRIVATE_TORRENT_ROOT / f"{info_hash.lower()}.torrent"
+                form = {} if private_torrent.is_file() else {"magnet": f"magnet:?xt=urn:btih:{info_hash}"}
+                if private_torrent.is_file():
+                    form["seed"] = "1"
                 if play:
                     form["add_only_if_cached"] = "true"
-                created = self.torbox_request("createtorrent", form=form)
+                created = self.torbox_request("createtorrent", form=form, files={"file": private_torrent} if private_torrent.is_file() else None)
                 torrent_id = created.get("torrent_id") or created.get("id") if isinstance(created, dict) else None
             if not torrent_id:
                 raise RuntimeError("TorBox did not return a torrent ID.")

@@ -1,4 +1,5 @@
 import json
+import gzip
 import threading
 import tempfile
 import unittest
@@ -13,6 +14,37 @@ class ValidationTests(unittest.TestCase):
     def test_valid_info_hashes(self):
         self.assertTrue(INFO_HASH.fullmatch("0123456789abcdef0123456789abcdef01234567"))
         self.assertTrue(INFO_HASH.fullmatch("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"))
+
+    def test_private_tracker_settings_never_expose_cookie(self):
+        server = object.__new__(UnarrServer)
+        server.torrentday_cookie = "uid=1; pass=secret"
+        server.torrentday_base_url = "https://tday.love/"
+        server.torrentday_freeleech = True
+        settings = server.get_private_tracker_settings()
+        self.assertTrue(settings["configured"])
+        self.assertNotIn("cookie", settings)
+        self.assertNotIn("secret", json.dumps(settings))
+
+    def test_torrent_metadata_extracts_exact_info_hash_and_tracker(self):
+        data = b"d8:announce24:https://tracker.test/ann4:infod4:name4:testee"
+        info_hash, trackers = UnarrServer.torrent_metadata(data)
+        self.assertEqual(info_hash, __import__("hashlib").sha1(b"d4:name4:teste").hexdigest())
+        self.assertEqual(trackers, ["https://tracker.test/ann"])
+
+    def test_torrentday_html_fallback_keeps_real_download_url(self):
+        markup = b'''<table><tr><td class="torrentNameInfo"><a href="/t/100">Example S01E02 1080p</a></td>
+            <td><a href="/download.php/100/Example.torrent">DL</a></td><td>1.5 GB</td>
+            <td class="seedersInfo">17</td></tr></table>'''
+        [result] = UnarrServer.parse_torrentday_html(markup, "https://www.torrentday.com/")
+        self.assertEqual(result["downloadUrl"], "https://www.torrentday.com/download.php/100/Example.torrent")
+        self.assertEqual(result["seeders"], 17)
+        self.assertEqual(result["size"], round(1.5 * 1024 ** 3))
+
+    def test_torrentday_html_parser_accepts_decompressed_gzip_body(self):
+        markup = b'<tr><td class="torrentNameInfo"><a href="/t/1">Movie 1080p</a></td><td><a href="/download.php/1/Movie.torrent">DL</a></td></tr>'
+        self.assertTrue(gzip.compress(markup).startswith(b"\x1f\x8b"))
+        [result] = UnarrServer.parse_torrentday_html(gzip.decompress(gzip.compress(markup)), "https://www.torrentday.com/")
+        self.assertEqual(result["t"], "1")
 
     def test_rejects_command_injection(self):
         for value in ("", "../../bin/sh", "magnet:?xt=urn:btih:nope", "a" * 41):
