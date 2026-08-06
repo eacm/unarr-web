@@ -144,6 +144,10 @@ class AppDatabase:
         except json.JSONDecodeError:
             return None, 0
 
+    def invalidate_provider_cache(self, provider):
+        with self.lock, self.connect() as connection:
+            connection.execute("DELETE FROM provider_cache WHERE provider = ?", (provider,))
+
     def replace_library_items(self, source, items):
         now = time.time()
         rows = [(source, str(item.get("id") or item.get("filePath") or index), json.dumps(item, separators=(",", ":")), now) for index, item in enumerate(items)]

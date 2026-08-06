@@ -4,7 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="description" content="A local web interface for unarr">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <title>unarr web</title><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/player.css">
+  <title>unarr web</title><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/player.css?v=20260805-custom-two-rows">
 </head>
 <body>
   <header><a class="brand" href="/"><span class="mark">u</span>unarr</a><nav><button id="discover-nav" class="nav-button active">Discover</button><button id="library-nav" class="nav-button">Library</button><button id="settings-nav" class="nav-button">Settings</button></nav><div class="header-actions"><button id="activity-button" class="activity-button" type="button" aria-label="Download activity">♢<span id="activity-count" hidden></span></button><button id="connection" class="pill connection-button" type="button">Checking local CLI…</button></div></header>
@@ -30,5 +30,5 @@
   <dialog id="activity-dialog" class="activity-dialog"><div class="dialog-head"><h2>Download activity</h2><button id="close-activity-dialog" aria-label="Close">×</button></div><div id="activity-results" class="activity-results"></div></dialog>
   <dialog id="poster-actions" class="poster-actions"><div class="dialog-head"><div><p class="eyebrow">TITLE OPTIONS</p><h2 id="poster-action-title">Title</h2></div><button id="close-poster-actions" aria-label="Close">×</button></div><div class="poster-action-buttons"><button id="poster-watchlist-action" type="button">Add to watchlist</button><button id="poster-watched-action" type="button">Mark watched</button><button id="poster-download-action" type="button">Download options</button><button id="poster-continue-action" class="secondary" type="button" hidden>Remove from Continue Watching</button></div></dialog>
   <dialog id="library-actions" class="poster-actions"><div class="dialog-head"><div><p class="eyebrow">LIBRARY OPTIONS</p><h2 id="library-action-title">Item</h2></div><button id="close-library-actions" aria-label="Close">×</button></div><div id="library-action-buttons" class="poster-action-buttons"></div></dialog>
-  <div id="toast" role="status"></div><script src="/app.js?v=20260805-compact-layout" defer></script>
+  <div id="toast" role="status"></div><script src="/app.js?v=20260805-log-hardening" defer></script>
 </body></html>

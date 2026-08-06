@@ -1,8 +1,10 @@
 import json
 import gzip
+import io
 import threading
 import tempfile
 import unittest
+import urllib.error
 from unittest.mock import Mock, patch
 from pathlib import Path
 from types import SimpleNamespace
@@ -134,7 +136,7 @@ class ValidationTests(unittest.TestCase):
         self.assertFalse(dashboard["configured"])
         self.assertEqual(
             [section["id"] for section in dashboard["sections"]],
-            ["continue", "start", "calendar", "watchlist", "history", "collection", "ratings", "recommendations", "trending", "popular", "anticipated", "lists"],
+            ["custom", "continue", "start", "calendar", "watchlist", "history", "collection", "ratings", "recommendations", "trending", "popular", "anticipated", "lists"],
         )
         self.assertTrue(all(section["locked"] for section in dashboard["sections"]))
 
@@ -164,6 +166,91 @@ class ValidationTests(unittest.TestCase):
         server.trakt_access_token = "token"
         with self.assertRaises(ValueError):
             server.update_trakt_watchlist({"action": "add", "type": "movie", "traktId": "1"})
+
+    def test_favorite_update_rejects_invalid_title(self):
+        server = object.__new__(UnarrServer)
+        server.trakt_access_token = "token"
+        with self.assertRaises(ValueError):
+            server.update_trakt_favorite({"action": "add", "type": "movie", "traktId": "1"})
+
+    def test_favorite_update_invalidates_sqlite_cache(self):
+        server = object.__new__(UnarrServer)
+        server.trakt_access_token = "token"
+        server.trakt_client_id = "client"
+        server.trakt_lock = threading.Lock()
+        server.trakt_cache = server.trakt_favorites_cache = []
+        server.database = Mock()
+        server.ensure_trakt_library_list = Mock(return_value=314)
+        server.trakt_write = Mock(return_value={"added": {"movies": 1}})
+        result = server.update_trakt_favorite({"action": "add", "type": "movie", "traktId": 42})
+        self.assertTrue(result["ok"])
+        server.trakt_write.assert_called_once_with("/users/me/lists/314/items", {"movies": [{"ids": {"trakt": 42}}]}, "POST")
+        server.database.invalidate_provider_cache.assert_called_once_with("trakt_library_list")
+
+    def test_favorite_remove_uses_library_list(self):
+        server = object.__new__(UnarrServer)
+        server.trakt_access_token = "token"
+        server.trakt_client_id = "client"
+        server.trakt_lock = threading.Lock()
+        server.trakt_cache = server.trakt_favorites_cache = []
+        server.database = Mock()
+        server.ensure_trakt_library_list = Mock(return_value=314)
+        server.trakt_write = Mock(return_value={"deleted": {"movies": 1}})
+        result = server.update_trakt_favorite({"action": "remove", "type": "movie", "traktId": 42})
+        self.assertTrue(result["ok"])
+        server.trakt_write.assert_called_once_with("/users/me/lists/314/items", {"movies": [{"ids": {"trakt": 42}}]}, "DELETE")
+
+    def test_library_list_is_created_and_legacy_favorites_are_moved_once(self):
+        server = object.__new__(UnarrServer)
+        server.trakt_library_lock = threading.Lock()
+        server.trakt_library_list_id = None
+        server.trakt_library_migrated = ""
+        server.trakt_user = {"username": "tester"}
+        server.write_trakt_settings = Mock()
+        responses = {
+            "/users/me/lists?limit=100": [],
+            "/sync/favorites/movies?limit=1000": [{"movie": {"ids": {"trakt": 42}}}],
+            "/sync/favorites/shows?limit=1000": [{"show": {"ids": {"trakt": 84}}}],
+        }
+        server.trakt_request = Mock(side_effect=lambda path, authenticated=False: responses[path])
+        server.trakt_write = Mock(side_effect=[{"ids": {"trakt": 314}}, {"added": {"movies": 1, "shows": 1}}, {"deleted": {"movies": 1, "shows": 1}}])
+        self.assertEqual(server.ensure_trakt_library_list(), 314)
+        payload = {"movies": [{"ids": {"trakt": 42}}], "shows": [{"ids": {"trakt": 84}}]}
+        self.assertEqual(server.trakt_write.call_args_list[1].args, ("/users/me/lists/314/items", payload))
+        self.assertEqual(server.trakt_write.call_args_list[2].args, ("/sync/favorites/remove", payload))
+        self.assertEqual(server.trakt_library_migrated, "tester")
+        server.write_trakt_settings.assert_called_once()
+
+    def test_trakt_library_write_retries_temporary_failure(self):
+        server = object.__new__(UnarrServer)
+        server.trakt_access_token = "token"
+        server.trakt_client_id = "client"
+        failure = urllib.error.HTTPError(
+            "https://api.trakt.tv/users/me/lists/314/items", 503, "Unavailable", {},
+            io.BytesIO(b'{"error":"temporary"}'),
+        )
+        response = Mock()
+        response.__enter__ = Mock(return_value=io.BytesIO(b'{"added":{"movies":1}}'))
+        response.__exit__ = Mock(return_value=False)
+        with patch("server.urllib.request.urlopen", side_effect=[failure, response]), patch("server.time.sleep") as sleep:
+            result = server.trakt_write("/users/me/lists/314/items", {"movies": [{"ids": {"trakt": 42}}]})
+        self.assertEqual(result["added"]["movies"], 1)
+        sleep.assert_called_once_with(1)
+
+    def test_custom_rail_accepts_multi_year_ranges(self):
+        server = object.__new__(UnarrServer)
+        server.trakt_client_id = "client"
+        server.trakt_access_token = None
+        server.database = Mock()
+        server.database.get_provider_cache.return_value = (None, 0)
+        server.database.get_library_items.return_value = []
+        server.library_links = {}
+        server.trakt_request = Mock(side_effect=[[{"released": "2002-01-01", "id": offset + index} for index in range(250)] for offset in range(0, 9000, 250)])
+        server.normalize_trakt_item = Mock(side_effect=lambda value, section: {"mediaType": "movie", "ids": {"trakt": value["id"]}, "calendarAt": value["released"], "genres": []})
+        result = server.get_trakt_custom({"from": ["2000-01-01"], "to": ["2002-12-31"], "media": ["movie"], "genre": ["all"]})
+        self.assertEqual(len(result["items"]), 9000)
+        self.assertEqual(server.trakt_request.call_count, 36)
+        self.assertTrue(any("/2002-12-01/31" in call.args[0] for call in server.trakt_request.call_args_list))
 
     def test_poster_states_and_long_press_actions_exist(self):
         app = (Path(__file__).parent / "web" / "app.js").read_text()
@@ -247,6 +334,8 @@ class ValidationTests(unittest.TestCase):
         for identifier in ('id="library-media"', 'id="library-from"', 'id="library-to"', 'id="poster-watched-action"'):
             self.assertIn(identifier, markup)
         for behavior in ("unarrRailPreferences", "/api/trakt/calendar", "/api/trakt/history", "/api/trakt/continue", "rail-visibility-toggle", "unarrActivitySeen"):
+            self.assertIn(behavior, app)
+        for behavior in ("/api/trakt/custom", "/api/trakt/favorites", "rail-genre", "rail-media", "favorite-heart"):
             self.assertIn(behavior, app)
 
     def test_torbox_control_uses_json_not_multipart(self):
