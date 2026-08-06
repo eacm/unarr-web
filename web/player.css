@@ -36,8 +36,9 @@ header nav { display: flex; gap: 3px; padding: 4px; border: 1px solid #ffffff0d;
 h1 { max-width: 900px; margin: 16px 0 26px; color: #f6f7f3; font: 650 clamp(50px,8vw,100px)/.94 Inter,ui-sans-serif,system-ui,sans-serif; letter-spacing: -.072em; }
 h1 em { color: var(--lime); font-style: normal; font-weight: inherit; }
 .lede { max-width: 670px; color: #a8ada8; font-size: clamp(17px,2vw,21px); }
-.search { position: relative; z-index: 12; grid-template-columns: 1fr auto; margin-top: 48px; border-color: #ffffff15; border-radius: 16px; background: #121512dc; box-shadow: 0 28px 90px #0008; backdrop-filter: blur(16px); }
-.search input { color: var(--ink); }
+.search { position: relative; z-index: 12; grid-template-columns: 1fr auto; margin: 0; padding: 4px; border-color: #ffffff15; border-radius: 12px; background: #121512dc; box-shadow: 0 28px 90px #0008; backdrop-filter: blur(16px); }
+.search input { min-height: 38px; color: var(--ink); padding: 8px 10px; font-size: 12px; font-weight: 600; }
+.search button { min-height: 38px; padding: 0 18px; }
 .search button, .settings-card button, .trakt-device a { border: 0; border-radius: 999px; background: var(--lime); color: #11140f; font-weight: 800; }
 .filters { border-color: #ffffff0e; }
 .search-matches { position: absolute; z-index: 30; top: calc(100% + 9px); left: 0; right: 0; max-height: min(590px,70vh); overflow-y: auto; border: 1px solid #ffffff18; border-radius: 15px; background: #0d100df5; padding: 8px; box-shadow: 0 28px 90px #000c; backdrop-filter: blur(22px); }
@@ -70,7 +71,7 @@ dialog { border-color: #ffffff16; background: #101310; box-shadow: 0 35px 100px 
 .episodes { display: grid; gap: 10px; margin-top: 16px; }.episode-card { display: grid; grid-template-columns: 150px 1fr; gap: 14px; overflow: hidden; border: 1px solid #ffffff10; border-radius: 11px; background: #090b09; }.episode-card img { width: 100%; height: 100%; min-height: 92px; object-fit: cover; }.episode-card > div { padding: 12px 14px 12px 0; }.episode-card b { display: block; }.episode-card small { color: var(--muted); }.episode-card p { margin: 6px 0 0; color: #adb2ad; font-size: 13px; }
 .episode-card.target-episode { border-color: #d7ff6480; box-shadow: 0 0 0 2px #d7ff6420; }
 
-.trakt-dashboard { margin: 0 0 50px; padding-top: 42px; }
+.trakt-dashboard { margin: 0 0 50px; padding-top: 0; }
 .trakt-loading, .trakt-setup { border: 1px solid #ffffff10; border-radius: 15px; background: #ffffff08; color: var(--muted); padding: 18px; backdrop-filter: blur(12px); }
 .trakt-setup { display: flex; align-items: baseline; gap: 12px; margin-bottom: 34px; }
 .trakt-setup strong { color: var(--ink); }
@@ -102,7 +103,7 @@ dialog { border-color: #ffffff16; background: #101310; box-shadow: 0 35px 100px 
 .trakt-progress::-webkit-progress-bar { background: #ffffff35; }.trakt-progress::-webkit-progress-value { background: var(--lime); box-shadow: 0 0 15px var(--lime); }.trakt-progress::-moz-progress-bar { background: var(--lime); }
 .trakt-placeholder { display: grid; place-items: center; min-width: 150px; padding: 20px; color: var(--muted); background: #101310; }
 
-.library-tools { margin-top: 48px; border-color: #ffffff10; border-radius: 14px; background: #101310cc; backdrop-filter: blur(16px); }
+.library-tools { margin: 0; border-color: #ffffff10; border-radius: 14px; background: #101310cc; backdrop-filter: blur(16px); }
 .library-tools { display:flex; align-items:end; flex-wrap:wrap; gap:12px; padding:16px; }.library-control { display:grid; gap:6px; color:var(--muted); font-size:10px; font-weight:800; letter-spacing:.06em; text-transform:uppercase; }.library-control input,.library-control select { min-height:38px; border:1px solid #ffffff18; border-radius:9px; background:#080a08; color:var(--ink); padding:8px 10px; font:600 12px Inter,ui-sans-serif,system-ui,sans-serif; text-transform:none; letter-spacing:normal; }.library-control:first-child { flex:1 1 220px; }.library-control:first-child input { width:100%; }.library-tabs { flex-basis:100%; }
 .library-tabs { display:flex; flex-wrap:wrap; gap:7px; }.library-tabs button { border:1px solid #ffffff16; border-radius:99px; padding:8px 12px; background:transparent; color:var(--muted); font:inherit; font-size:12px; font-weight:750; cursor:pointer; }.library-tabs button.active { background:var(--lime); border-color:var(--lime); color:#10120f; }
 .library-tools select, .track-pickers select { border-color: #ffffff13; background: #080a08; }
@@ -120,7 +121,8 @@ dialog { border-color: #ffffff16; background: #101310; box-shadow: 0 35px 100px 
 .track-pickers label { color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
 .track-pickers select { display: block; width: 100%; min-width: 0; margin-top: 4px; border-radius: 8px; padding: 7px; color: var(--ink); text-transform: none; letter-spacing: normal; }
 
-.settings-panel { display: grid; grid-template-columns: 1.2fr 1fr; gap: 18px; padding: 76px 0; }
+.settings-panel { display: grid; grid-template-columns: 1.2fr 1fr; gap: 18px; padding: 0 0 76px; }
+#library-tools:not([hidden]) ~ #results-bar { margin-top: 0; }
 .settings-card { border: 1px solid #ffffff10; border-radius: 18px; background: linear-gradient(145deg,#151915,#0d100d); padding: clamp(24px,4vw,40px); box-shadow: 0 28px 70px #0004; }
 .settings-card h2 { margin: 5px 0 8px; font-size: 30px; }
 .settings-card p { color: var(--muted); }
@@ -156,7 +158,9 @@ dialog { border-color: #ffffff16; background: #101310; box-shadow: 0 35px 100px 
   .library-tools { flex-wrap: wrap; }
   .trakt-row-head { align-items:flex-start; gap:10px; }.rail-controls { gap:6px!important; }.rail-date-sort { max-width:130px; }.calendar-range { width:100%; }.calendar-range input { flex:1; }
   #transcode-state { width: 100%; }
-  .settings-panel { grid-template-columns: 1fr; padding-top: 38px; }
+  .search { grid-template-columns: 1fr auto; }
+  .search button { height: 38px; }
+  .settings-panel { grid-template-columns: 1fr; padding-top: 0; }
   .detail-body { display: block; padding-top: 180px; }.detail-poster { width: 120px; margin-bottom: 18px; }.detail-backdrop { height: 330px; }.detail-shade { background: linear-gradient(180deg,#07090720 0,#101310 330px); }.episode-card { grid-template-columns: 105px 1fr; }.episode-card p { display: none; }
   .release-choice { grid-template-columns:1fr; }.release-actions { flex-direction:row; flex-wrap:wrap; }.header-actions .connection-button { max-width:120px; }
 }
